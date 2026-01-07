@@ -290,8 +290,8 @@ def render_edit_tab(db):
     
     st.divider()
     
-    # 編輯表單
-    with st.form("edit_tenant_form"):
+    # ✅ 修正：給 form 加上動態 key，每次選不同房客時會重建 form
+    with st.form(key=f"edit_tenant_form_{tenant_id}"):
         col1, col2 = st.columns(2)
         
         with col1:
@@ -299,26 +299,25 @@ def render_edit_tab(db):
                 "房號 *",
                 ROOMS.ALL_ROOMS,
                 index=ROOMS.ALL_ROOMS.index(tenant_data['room_number']),
-                key="edit_room"
+                key=f"edit_room_{tenant_id}"
             )
             name = st.text_input(
                 "姓名 *",
                 value=tenant_data['tenant_name'],
-                key="edit_name"
+                key=f"edit_name_{tenant_id}"
             )
             phone = st.text_input(
                 "電話",
                 value=tenant_data['phone'] or "",
-                key="edit_phone"
+                key=f"edit_phone_{tenant_id}"
             )
-            # ✅ 修正：改用 tenant_data['deposit']
             deposit = st.number_input(
                 "押金 *",
                 min_value=0,
                 max_value=1000000,
                 value=int(tenant_data['deposit'] or 0),
                 step=100,
-                key="edit_deposit",
+                key=f"edit_deposit_{tenant_id}",
             )
         
         with col2:
@@ -327,23 +326,23 @@ def render_edit_tab(db):
                 min_value=0,
                 value=int(tenant_data['base_rent']),
                 step=500,
-                key="edit_rent"
+                key=f"edit_rent_{tenant_id}"
             )
             lease_start = st.date_input(
                 "租約開始 *",
                 value=pd.to_datetime(tenant_data['lease_start']).date(),
-                key="edit_start"
+                key=f"edit_start_{tenant_id}"
             )
             lease_end = st.date_input(
                 "租約到期 *",
                 value=pd.to_datetime(tenant_data['lease_end']).date(),
-                key="edit_end"
+                key=f"edit_end_{tenant_id}"
             )
             payment_method = st.selectbox(
                 "繳款方式 *",
                 PAYMENT.METHODS,
                 index=PAYMENT.METHODS.index(tenant_data['payment_method']),
-                key="edit_method"
+                key=f"edit_method_{tenant_id}"
             )
         
         st.divider()
@@ -353,7 +352,7 @@ def render_edit_tab(db):
             has_water_fee = st.checkbox(
                 "包含水費折扣",
                 value=bool(tenant_data.get('has_water_fee', False)),
-                key="edit_water"
+                key=f"edit_water_{tenant_id}"
             )
         
         with col4:
@@ -362,13 +361,13 @@ def render_edit_tab(db):
                 min_value=0,
                 max_value=12,
                 value=int(tenant_data.get('annual_discount_months', 0)),
-                key="edit_discount"
+                key=f"edit_discount_{tenant_id}"
             )
         
         discount_notes = st.text_area(
             "折扣說明",
             value=tenant_data.get('discount_notes', ''),
-            key="edit_notes"
+            key=f"edit_notes_{tenant_id}"
         )
         
         col_update, col_delete = st.columns([3, 1])
@@ -417,17 +416,14 @@ def render_edit_tab(db):
                 st.error(msg)
         
         if delete_btn:
-            if confirm_dialog(
-                f"確定要刪除 {tenant_data['tenant_name']} 的資料嗎？",
-                "delete_tenant_confirm"
-            ):
-                ok, msg = db.delete_tenant(tenant_id)
-                if ok:
-                    st.success(msg)
-                    del st.session_state.delete_tenant_confirm
-                    st.rerun()
-                else:
-                    st.error(msg)
+            # ✅ 修正：簡化刪除確認（不用 confirm_dialog，直接執行）
+            # 如果你想要二次確認，可以用 session_state 實作
+            ok, msg = db.delete_tenant(tenant_id)
+            if ok:
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
 
 def render(db):
     """主渲染函數"""
