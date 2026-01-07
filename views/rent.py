@@ -1,11 +1,17 @@
 """
-租金管理 - 完整重構版
+租金管理 - 完整重構版 v2.0
+
 特性:
 - 批量生成應收單
-- 年繳折扣自動計算
-- 水費自動處理
+- 年繳折扣自動計算（正確版）
+- 水費邏輯修正
 - 視覺化報表
 - 批量操作
+
+修正說明:
+1. has_water_fee = True → base_rent 不含水費（例如 4000）
+2. has_water_fee = False → base_rent 已含水費（例如 4100）
+3. 年繳優惠：月租5000，優惠1個月 → 5000×11÷12 = 4583
 """
 
 import streamlit as st
@@ -21,12 +27,16 @@ except ImportError:
     def section_header(title, icon="", divider=True):
         st.markdown(f"### {icon} {title}")
         if divider: st.divider()
+    
     def metric_card(label, value, delta="", icon="", color="normal"):
         st.metric(label, value, delta)
+    
     def empty_state(msg, icon="", desc=""):
         st.info(f"{icon} {msg}")
+    
     def data_table(df, key="table"):
         st.dataframe(df, use_container_width=True, key=key)
+    
     def info_card(title, content, icon="", type="info"):
         st.info(f"{icon} {title}: {content}")
 
@@ -39,56 +49,103 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# ============== 租金計算邏輯 ==============
 
-def calculate_rent_with_discount(base_rent: float,
-                                 has_water_fee: bool,
-                                 payment_method: str,
-                                 annual_discount_months: int = 0) -> dict:
+# ============== 租金計算邏輯（已修正）==============
+
+def calculate_monthly_rent(tenant: dict) -> float:
     """
-    計算租金 (含折扣)
+    計算實際每月應收租金（修正版）
+    
+    業務邏輯說明:
+    1. base_rent 是房客資料中填寫的「基礎月租」：
+       - 如果房客要付水費：填 4100（已包含水費100）
+       - 如果房客不用付水費（房東提供優惠）：填 4000（不含水費）
+    
+    2. has_water_fee 欄位意義：
+       - True = 房東提供水費優惠，base_rent 不含水費（例如4000）
+       - False = 房客需付水費，base_rent 已包含水費（例如4100）
+       
+       → 所以不需要再做任何加減，直接使用 base_rent
+    
+    3. 年繳優惠計算：
+       - 月租 5000，年繳優惠 1 個月
+       - 實際收款 = 5000 × 11 = 55000（只收11個月）
+       - 分攤到12個月 = 55000 ÷ 12 = 4583.33 → 4583
     
     Args:
-        base_rent: 基本月租
-        has_water_fee: 是否包含水費折扣
-        payment_method: 繳款方式
-        annual_discount_months: 年繳折扣月數
+        tenant: 房客資料字典，需包含:
+            - base_rent: 基礎月租
+            - payment_method: 繳款方式
+            - annual_discount_months: 年繳折扣月數
+    
+    Returns:
+        每月應收金額（四捨五入到整數）
+    """
+    base_rent = float(tenant.get('base_rent', 0))
+    payment_method = tenant.get('payment_method', '月繳')
+    annual_discount_months = int(tenant.get('annual_discount_months', 0))
+    
+    # ========== 年繳優惠處理 ==========
+    if payment_method == '年繳' and annual_discount_months > 0:
+        # 計算年繳實際收款金額
+        months_to_pay = 12 - annual_discount_months  # 例如優惠1個月 → 收11個月
+        annual_total = base_rent * months_to_pay     # 例如 5000 × 11 = 55000
+        monthly_amount = annual_total / 12            # 例如 55000 ÷ 12 = 4583.33
+    else:
+        # 月繳/半年繳：直接使用 base_rent
+        monthly_amount = base_rent
+    
+    # ========== 水費處理 ==========
+    # base_rent 已經是「實際要收的金額」：
+    # - 如果 has_water_fee = True：base_rent 不含水費（例如 4000）
+    # - 如果 has_water_fee = False：base_rent 已含水費（例如 4100）
+    # 所以不需要再做任何加減
+    
+    return round(monthly_amount, 0)
+
+
+def calculate_rent_detail(tenant: dict) -> dict:
+    """
+    計算租金明細（用於顯示）
     
     Returns:
         {
-            'monthly_rent': 每月應繳,
-            'water_discount': 水費折扣,
-            'annual_discount': 年繳折扣,
-            'total_annual': 年繳總額
+            'base_rent': 基礎月租,
+            'monthly_rent': 每月實際應收,
+            'has_water_discount': 是否有水費優惠,
+            'annual_discount_months': 年繳優惠月數,
+            'annual_total': 年繳總額（如適用）,
+            'payment_method': 繳款方式
         }
     """
-    # 1. 基本租金
-    monthly_rent = base_rent
+    base_rent = float(tenant.get('base_rent', 0))
+    has_water_fee = tenant.get('has_water_fee', False)
+    payment_method = tenant.get('payment_method', '月繳')
+    annual_discount_months = int(tenant.get('annual_discount_months', 0))
     
-    # 2. 水費折扣
-    water_discount = PAYMENT.DEFAULT_WATER_FEE if has_water_fee else 0
-    monthly_rent -= water_discount
+    # 計算實際每月應收
+    monthly_rent = calculate_monthly_rent(tenant)
     
-    # 3. 年繳折扣
-    annual_discount = 0
-    if payment_method == "年繳" and annual_discount_months > 0:
-        annual_discount = monthly_rent * annual_discount_months
-    
-    # 4. 年繳總額
-    total_annual = (monthly_rent * 12) - annual_discount
+    # 年繳總額
+    annual_total = 0
+    if payment_method == '年繳':
+        if annual_discount_months > 0:
+            months_to_pay = 12 - annual_discount_months
+            annual_total = base_rent * months_to_pay
+        else:
+            annual_total = base_rent * 12
     
     return {
+        'base_rent': base_rent,
         'monthly_rent': monthly_rent,
-        'water_discount': water_discount,
-        'annual_discount': annual_discount,
-        'total_annual': total_annual,
-        'effective_monthly': total_annual / 12 if payment_method == "年繳" else monthly_rent
+        'has_water_discount': has_water_fee,
+        'annual_discount_months': annual_discount_months,
+        'annual_total': annual_total,
+        'payment_method': payment_method
     }
 
 
-def generate_schedule_list(tenant: dict,
-                          start_date: date,
-                          months: int) -> list:
+def generate_schedule_list(tenant: dict, start_date: date, months: int) -> list:
     """
     生成應收單列表
     
@@ -102,22 +159,17 @@ def generate_schedule_list(tenant: dict,
     """
     schedules = []
     
-    rent_info = calculate_rent_with_discount(
-        tenant['base_rent'],
-        tenant.get('has_water_fee', False),
-        tenant['payment_method'],
-        tenant.get('annual_discount_months', 0)
-    )
+    # 計算實際每月應收金額
+    monthly_rent = calculate_monthly_rent(tenant)
     
     for i in range(months):
         target_date = start_date + relativedelta(months=i)
-        
         schedules.append({
             'room_number': tenant['room_number'],
             'tenant_name': tenant['tenant_name'],
             'payment_year': target_date.year,
             'payment_month': target_date.month,
-            'amount': rent_info['monthly_rent'],
+            'amount': monthly_rent,  # 使用計算後的金額
             'payment_method': tenant['payment_method'],
             'due_date': date(target_date.year, target_date.month, 5)
         })
@@ -155,7 +207,6 @@ def render_single_tab(db):
     )
     
     tenant = tenant_options[selected]
-    
     st.divider()
     
     # 顯示房客資訊
@@ -165,32 +216,38 @@ def render_single_tab(db):
         metric_card("房號", tenant['room_number'], icon="🏠")
     
     with col2:
-        metric_card("月租", f"${tenant['base_rent']:,}", icon="💰")
+        metric_card("基礎月租", f"${tenant['base_rent']:,}", icon="💰")
     
     with col3:
-        water_text = "是" if tenant.get('has_water_fee', False) else "否"
-        metric_card("水費折扣", water_text, icon="💧")
+        water_text = "✅ 有優惠" if tenant.get('has_water_fee', False) else "❌ 無優惠"
+        metric_card("水費優惠", water_text, icon="💧")
     
     with col4:
         metric_card("繳款方式", tenant['payment_method'], icon="📋")
     
-    # 計算租金
-    rent_info = calculate_rent_with_discount(
-        tenant['base_rent'],
-        tenant.get('has_water_fee', False),
-        tenant['payment_method'],
-        tenant.get('annual_discount_months', 0)
-    )
+    # 計算租金明細
+    rent_detail = calculate_rent_detail(tenant.to_dict())
     
-    st.info(f"""
+    # 顯示計算明細
+    detail_text = f"""
 💰 **租金計算明細**
-- 基本月租: ${tenant['base_rent']:,}
-- 水費折扣: -${rent_info['water_discount']}
-- 實際月租: ${rent_info['monthly_rent']:,}
-{f"- 年繳折扣: -{rent_info['annual_discount']:,} ({tenant.get('annual_discount_months', 0)} 個月)" if rent_info['annual_discount'] > 0 else ""}
-{f"- 年繳總額: ${rent_info['total_annual']:,}" if tenant['payment_method'] == "年繳" else ""}
-""")
+
+- 基礎月租: ${rent_detail['base_rent']:,.0f}
+- 水費優惠: {'✅ 有（base_rent 不含水費）' if rent_detail['has_water_discount'] else '❌ 無（base_rent 已含水費）'}
+"""
     
+    if rent_detail['payment_method'] == '年繳' and rent_detail['annual_discount_months'] > 0:
+        detail_text += f"""
+- 年繳優惠: {rent_detail['annual_discount_months']} 個月
+- 年繳總額: ${rent_detail['annual_total']:,.0f}（收 {12 - rent_detail['annual_discount_months']} 個月）
+- **每月應收**: ${rent_detail['monthly_rent']:,.0f}（= ${rent_detail['annual_total']:,.0f} ÷ 12）
+"""
+    else:
+        detail_text += f"""
+- **每月應收**: ${rent_detail['monthly_rent']:,.0f}
+"""
+    
+    st.info(detail_text)
     st.divider()
     
     # 輸入期間
@@ -232,18 +289,21 @@ def render_single_tab(db):
     if st.button("✅ 預填應收單", type="primary", disabled=already_exists):
         due_date = date(year, month, due_day)
         
+        # 使用計算後的金額
+        monthly_rent = calculate_monthly_rent(tenant.to_dict())
+        
         ok, msg = db.add_payment_schedule(
             tenant['room_number'],
             tenant['tenant_name'],
             year,
             month,
-            rent_info['monthly_rent'],
+            monthly_rent,  # 使用正確計算的金額
             tenant['payment_method'],
             due_date
         )
         
         if ok:
-            st.success(msg)
+            st.success(f"✅ {msg}\n\n**應收金額**: ${monthly_rent:,.0f}")
             st.balloons()
         else:
             st.error(msg)
@@ -319,7 +379,6 @@ def render_batch_tab(db):
     # 預覽
     start_date = date(start_year, start_month, 1)
     preview_periods = []
-    
     for i in range(min(months_count, 6)):  # 最多預覽 6 個月
         target_date = start_date + relativedelta(months=i)
         preview_periods.append(f"{target_date.year}/{target_date.month}")
@@ -335,6 +394,26 @@ def render_batch_tab(db):
         filtered_tenants = filtered_tenants[filtered_tenants['room_number'].isin(filter_rooms)]
     
     st.write(f"**將處理房客數:** {len(filtered_tenants)} 個")
+    
+    # 預覽金額
+    st.divider()
+    st.write("### 📋 應收金額預覽")
+    
+    preview_data = []
+    for _, tenant in filtered_tenants.iterrows():
+        rent_detail = calculate_rent_detail(tenant.to_dict())
+        preview_data.append({
+            '房號': tenant['room_number'],
+            '房客': tenant['tenant_name'],
+            '繳款方式': tenant['payment_method'],
+            '基礎月租': f"${tenant['base_rent']:,.0f}",
+            '每月應收': f"${rent_detail['monthly_rent']:,.0f}",
+            '水費優惠': '✅' if rent_detail['has_water_discount'] else '❌',
+            '年繳優惠': f"{rent_detail['annual_discount_months']}月" if rent_detail['annual_discount_months'] > 0 else '-'
+        })
+    
+    preview_df = pd.DataFrame(preview_data)
+    st.dataframe(preview_df, use_container_width=True, hide_index=True)
     
     st.divider()
     
@@ -357,7 +436,6 @@ def render_batch_tab(db):
                 )
                 
                 all_schedules.extend(schedules)
-                
                 progress_bar.progress((idx + 1) / len(filtered_tenants) * 0.5)
             
             # 批量插入
@@ -393,7 +471,7 @@ def render_batch_tab(db):
 - 成功建立: **{success}** 筆
 - 跳過已存在: **{skip + skipped}** 筆
 - 失敗: **{fail}** 筆
-""")
+            """)
             
             if success > 0:
                 st.balloons()
@@ -509,7 +587,6 @@ def render_payment_tab(db):
         with col_mark:
             if st.button("✅ 批量標記已繳", disabled=len(selected_ids) == 0):
                 success, fail = db.batch_mark_paid(selected_ids)
-                
                 if success > 0:
                     st.success(f"✅ 成功標記 {success} 筆")
                     st.rerun()
@@ -520,7 +597,6 @@ def render_payment_tab(db):
     
     # 列表
     section_header("應收單列表", "📋", divider=False)
-    
     st.write(f"共 {len(df)} 筆")
     
     # 格式化
