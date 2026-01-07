@@ -1,25 +1,26 @@
 import streamlit as st
 import os
 
-# 1. Page Config 必須是第一個指令
+# Page Config
 st.set_page_config(
     page_title="幸福之家 Pro | 租務管理系統",
     page_icon="🏠",
     layout="wide",
-    initial_sidebar_state="expanded" # 預設展開，但允許收合
+    initial_sidebar_state="expanded"
 )
 
-# 2. CSS 載入函數
+# Load CSS
 def load_css(filename):
-    if os.path.exists(filename):
+    try:
         with open(filename) as f:
             st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
+    except FileNotFoundError:
+        pass
 
-# 載入 CSS
 css_path = os.path.join('assets', 'style.css')
 load_css(css_path)
 
-# 3. 初始化 DB (模擬)
+# Database
 from services.db import SupabaseDB
 
 @st.cache_resource
@@ -28,19 +29,15 @@ def get_db():
 
 db = get_db()
 
-# 4. 引入 Views
+# Import views
 from views import dashboard, tenants, rent, electricity, expenses, tracking, settings
 
 def main():
-    # ============ 側邊欄區域 ============
+    # ============ 側邊欄 ============
     with st.sidebar:
-        st.title("🏠 幸福之家 Pro )
-        st.markdown(
-            '<div style="font-size: 0.8rem; color: #888; margin-bottom: 20px;">Nordic Edition v14.1</div>',
-            unsafe_allow_html=True
-        )
+        st.title("🏠 幸福之家 Pro")
+        st.caption("Nordic Edition v14.2")  # 使用 caption 更簡潔
         
-        # 選單
         menu = st.radio(
             "功能選單",
             [
@@ -54,16 +51,8 @@ def main():
             ],
             label_visibility="collapsed"
         )
-        
-        st.divider()
-        st.caption("© 幸福之家 Pro | 租務管理系統")
-
-    # ============ 主內容區域 (注意縮排，這是在 sidebar 之外) ============
     
-    # 這裡顯示當前頁面標題，讓使用者知道自己在透過哪個頁面
-    # st.header(menu) 
-    
-    # 路由邏輯
+    # ============ Views 路由 ============
     if menu == "📊 儀表板":
         dashboard.render(db)
     elif menu == "💰 租金管理":
