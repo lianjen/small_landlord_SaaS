@@ -1,6 +1,5 @@
 """
 通知管理頁面
-- Streamlit 介面
 - LINE/Email 設定與測試
 - 手動觸發通知
 - 通知記錄查看
@@ -8,16 +7,16 @@
 
 import streamlit as st
 import pandas as pd
-from datetime import datetime, date
+from datetime import datetime
 import requests
 import logging
 
-# 導入組件
+# 導入組件（如果沒有就用簡化版）
 try:
     from components.cards import section_header, metric_card, empty_state, data_table, info_card
 except ImportError:
     def section_header(title, icon, divider=True):
-        st.markdown(f"{icon} {title}")
+        st.markdown(f"{icon} **{title}**")
         if divider:
             st.divider()
     
@@ -31,7 +30,7 @@ except ImportError:
         st.dataframe(df, use_container_width=True, key=key)
     
     def info_card(title, content, icon, type="info"):
-        st.info(f"{icon} {title}\n\n{content}")
+        st.info(f"{icon} **{title}**\n\n{content}")
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +43,7 @@ def render_settings_tab(db):
     
     info_card(
         "設定說明",
-        "請設定 LINE User ID 或 Email，系統會在每日自動發送租金提醒。",
+        "請設定 LINE User ID，系統會在每日自動發送租金提醒。",
         "ℹ️",
         type="info"
     )
@@ -68,7 +67,7 @@ def render_settings_tab(db):
         )
         
         st.write("**步驟 2：設定房東 LINE User ID**")
-        st.caption("加 LINE Bot 為好友後，從 Webhook Log 取得 User ID")
+        st.caption("加 LINE Bot 為好友後，發送訊息給 Bot，從 Webhook Log 取得 User ID")
         
         col1, col2 = st.columns([3, 1])
         with col1:
@@ -76,22 +75,25 @@ def render_settings_tab(db):
                 "房東 LINE User ID",
                 value=current_settings.get("landlord_line_user_id", ""),
                 placeholder="U1234567890abcdef...",
-                help="從 LINE Webhook 取得",
+                help="從 LINE Webhook 取得的 User ID",
                 key="line_user_id"
             )
         
         with col2:
             st.write("")
             st.write("")
-            if st.button("💾 儲存 LINE 設定"):
-                save_setting(db, "line_channel_access_token", line_token)
-                save_setting(db, "landlord_line_user_id", line_user_id)
-                st.success("✅ LINE 設定已儲存")
-                st.rerun()
+            if st.button("💾 儲存 LINE 設定", use_container_width=True):
+                try:
+                    save_setting(db, "line_channel_access_token", line_token)
+                    save_setting(db, "landlord_line_user_id", line_user_id)
+                    st.success("✅ LINE 設定已儲存")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"儲存失敗: {e}")
         
         # 測試 LINE 訊息
         st.divider()
-        if st.button("📤 發送測試訊息", disabled=not (line_token and line_user_id)):
+        if st.button("📤 發送測試訊息", disabled=not (line_token and line_user_id), use_container_width=True):
             with st.spinner("發送中..."):
                 success, msg = send_test_line_message(line_token, line_user_id)
                 if success:
@@ -99,20 +101,17 @@ def render_settings_tab(db):
                 else:
                     st.error(msg)
     
-    # === Email 設定 ===
+    # === Email 設定（預留） ===
     with st.expander("📧 Email 通知設定（選用）", expanded=False):
-        st.info("Email 通知功能尚未實作，敬請期待")
+        st.info("📝 Email 通知功能尚未實作，敬請期待")
         
         landlord_email = st.text_input(
             "房東 Email",
             value=current_settings.get("landlord_email", ""),
             placeholder="landlord@example.com",
-            key="landlord_email"
+            key="landlord_email",
+            disabled=True
         )
-        
-        if st.button("💾 儲存 Email 設定"):
-            save_setting(db, "landlord_email", landlord_email)
-            st.success("✅ Email 設定已儲存")
     
     # === 通知時間設定 ===
     with st.expander("⏰ 通知時間設定", expanded=False):
@@ -141,9 +140,31 @@ def render_settings_tab(db):
         st.caption("⚠️ 修改後需要更新 Supabase Cron Job 設定")
         
         if st.button("💾 儲存時間設定"):
-            save_setting(db, "notification_time_morning", morning_time.strftime("%H:%M"))
-            save_setting(db, "notification_time_evening", evening_time.strftime("%H:%M"))
-            st.success("✅ 通知時間已儲存")
+            try:
+                save_setting(db, "notification_time_morning", morning_time.strftime("%H:%M"))
+                save_setting(db, "notification_time_evening", evening_time.strftime("%H:%M"))
+                st.success("✅ 通知時間已儲存")
+            except Exception as e:
+                st.error(f"儲存失敗: {e}")
+    
+    # === 提前提醒天數 ===
+    with st.expander("📅 提前提醒設定", expanded=False):
+        reminder_days = st.number_input(
+            "提前幾天發送催繳提醒",
+            min_value=1,
+            max_value=7,
+            value=int(current_settings.get("reminder_days_before", "3")),
+            key="reminder_days"
+        )
+        
+        st.caption("例如：設定 3 天，則在租金到期前 3 天發送提醒")
+        
+        if st.button("💾 儲存提醒設定"):
+            try:
+                save_setting(db, "reminder_days_before", str(reminder_days))
+                st.success("✅ 提醒設定已儲存")
+            except Exception as e:
+                st.error(f"儲存失敗: {e}")
     
     # === 啟用/停用通知 ===
     st.divider()
@@ -157,15 +178,19 @@ def render_settings_tab(db):
             key="notification_enabled"
         )
         
-        if st.button("💾 儲存"):
-            save_setting(db, "enable_tenant_notification", "true" if notification_enabled else "false")
-            st.success("✅ 設定已更新")
+        if st.button("💾 儲存", key="save_enabled"):
+            try:
+                save_setting(db, "enable_tenant_notification", "true" if notification_enabled else "false")
+                st.success("✅ 設定已更新")
+                st.rerun()
+            except Exception as e:
+                st.error(f"儲存失敗: {e}")
     
     with col_info:
         if notification_enabled:
-            st.success("🟢 自動通知已啟用")
+            st.success("🟢 自動通知已啟用 - 系統會在設定的時間自動發送通知")
         else:
-            st.warning("🔴 自動通知已停用")
+            st.warning("🔴 自動通知已停用 - 不會自動發送通知")
 
 
 # ============== Tab 2: 手動觸發 ==============
@@ -186,46 +211,96 @@ def render_manual_tab(db):
     # 檢查設定
     settings = get_all_settings(db)
     has_line = settings.get("landlord_line_user_id") and settings.get("line_channel_access_token")
-    has_email = settings.get("landlord_email")
     
-    if not (has_line or has_email):
-        st.warning("⚠️ 請先到「系統設定」Tab 設定 LINE 或 Email")
+    if not has_line:
+        st.warning("⚠️ 請先到「系統設定」Tab 設定 LINE Token 和 User ID")
         return
     
+    # 顯示當前待通知項目
+    st.subheader("📋 當前待通知項目")
+    
+    try:
+        with db.get_connection() as conn:
+            df = pd.read_sql("""
+                SELECT 
+                    room_number,
+                    tenant_name,
+                    payment_year,
+                    payment_month,
+                    amount,
+                    due_date,
+                    notification_type,
+                    days_until_due
+                FROM vw_payments_need_notification
+                ORDER BY due_date
+            """, conn)
+        
+        if df.empty:
+            st.info("🎉 目前沒有需要通知的項目")
+        else:
+            # 統計
+            col1, col2, col3 = st.columns(3)
+            
+            reminder_count = len(df[df['notification_type'] == 'reminder'])
+            due_count = len(df[df['notification_type'] == 'due'])
+            overdue_count = len(df[df['notification_type'] == 'overdue'])
+            
+            with col1:
+                st.metric("📅 提前提醒", f"{reminder_count} 筆")
+            with col2:
+                st.metric("⏰ 今日到期", f"{due_count} 筆")
+            with col3:
+                st.metric("🚨 已逾期", f"{overdue_count} 筆", delta_color="inverse")
+            
+            st.divider()
+            st.dataframe(df, use_container_width=True, hide_index=True)
+    
+    except Exception as e:
+        st.error(f"查詢失敗: {e}")
+    
+    st.divider()
+    
     # 觸發按鈕
+    st.subheader("⚡ 立即發送通知")
+    
     col1, col2 = st.columns(2)
     
     with col1:
-        if st.button("☀️ 觸發早上通知", type="primary", disabled=not has_line):
-            trigger_edge_function(db, "morning")
+        if st.button("☀️ 觸發早上通知", type="primary", use_container_width=True):
+            with st.spinner("正在發送通知..."):
+                result = trigger_edge_function(db, "morning")
+                if result:
+                    st.success("✅ 早上通知已觸發")
+                    st.rerun()
+                else:
+                    st.error("❌ 觸發失敗，請檢查 Edge Function 設定")
     
     with col2:
-        if st.button("🌙 觸發晚上通知", type="primary", disabled=not has_line):
-            trigger_edge_function(db, "evening")
+        if st.button("🌙 觸發晚上通知", type="primary", use_container_width=True):
+            with st.spinner("正在發送通知..."):
+                result = trigger_edge_function(db, "evening")
+                if result:
+                    st.success("✅ 晚上通知已觸發")
+                    st.rerun()
+                else:
+                    st.error("❌ 觸發失敗，請檢查 Edge Function 設定")
     
     st.divider()
     
     # 顯示最近觸發記錄
-    st.write("**最近觸發記錄**")
+    st.subheader("📜 最近觸發記錄")
     
     try:
-        recent_logs = get_recent_notifications(db, limit=5)
+        recent_logs = get_recent_notifications(db, limit=10)
         
         if not recent_logs.empty:
             display_df = recent_logs.copy()
             display_df["created_at"] = pd.to_datetime(display_df["created_at"]).dt.strftime("%Y-%m-%d %H:%M")
             display_df["status"] = display_df["status"].apply(
-                lambda x: "✅" if x == "sent" else "❌" if x == "failed" else "⏳"
+                lambda x: "✅ 已發送" if x == "sent" else "❌ 失敗" if x == "failed" else "⏳ 待發送"
             )
             
-            show_cols = ["created_at", "notification_type", "status"]
-            rename = {
-                "created_at": "時間",
-                "notification_type": "類型",
-                "status": "狀態"
-            }
-            display_df = display_df.rename(columns=rename)
-            data_table(display_df[list(rename.values())], key="recent_triggers")
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
         else:
             empty_state("尚無記錄", "📭", "")
     
@@ -252,10 +327,10 @@ def render_logs_tab(db):
     
     with col2:
         filter_type = st.selectbox(
-            "通知類型",
-            [None, "landlord_morning_summary", "landlord_evening_summary", "payment_reminder"],
-            format_func=lambda x: "全部" if x is None else x,
-            key="log_type"
+            "接收者類型",
+            [None, "landlord", "tenant"],
+            format_func=lambda x: "全部" if x is None else "🏠 房東" if x == "landlord" else "👤 房客",
+            key="log_recipient"
         )
     
     with col3:
@@ -275,45 +350,7 @@ def render_logs_tab(db):
             return
         
         # 統計卡片
-        cols1, cols2, cols3 = st.columns(3)
+        cols1, cols2, cols3, cols4 = st.columns(4)
         
         with cols1:
-            metric_card("總記錄數", str(len(df)), None, "📊", color="normal")
-        
-        with cols2:
-            success_count = len(df[df["status"] == "sent"])
-            metric_card("已發送", str(success_count), None, "✅", color="success")
-        
-        with cols3:
-            failed_count = len(df[df["status"] == "failed"])
-            metric_card("失敗", str(failed_count), None, "❌", color="error")
-        
-        st.divider()
-        
-        # 顯示記錄表格
-        st.write(f"**共 {len(df)} 筆記錄**")
-        
-        display_df = df.copy()
-        display_df["created_at"] = pd.to_datetime(display_df["created_at"]).dt.strftime("%Y-%m-%d %H:%M")
-        display_df["status"] = display_df["status"].apply(
-            lambda x: "✅ 已發送" if x == "sent" else "❌ 失敗" if x == "failed" else "⏳ 待發送"
-        )
-        
-        # 選擇顯示欄位
-        show_cols = ["id", "created_at", "recipient_type", "notification_type", "status"]
-        rename = {
-            "id": "ID",
-            "created_at": "時間",
-            "recipient_type": "接收者",
-            "notification_type": "類型",
-            "status": "狀態"
-        }
-        display_df = display_df.rename(columns=rename)
-        data_table(display_df[list(rename.values())], key="notification_logs")
-        
-        # 失敗記錄處理
-        st.divider()
-        failed_df = df[df["status"] == "failed"]
-        
-        if not failed_df.empty:
-            st.write(f"**失敗記
+            st.metric
