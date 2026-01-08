@@ -1,489 +1,216 @@
-"""
-租金管理 - 完整重構版 v2.0
-
-特性:
-- 批量生成應收單
-- 年繳折扣自動計算（正確版）
-- 水費邏輯修正
-- 視覺化報表
-- 批量操作
-
-修正說明:
-1. has_water_fee = True → base_rent 不含水費（例如 4000）
-2. has_water_fee = False → base_rent 已含水費（例如 4100）
-3. 年繳優惠：月租5000，優惠1個月 → 5000×11÷12 = 4583
-"""
-
 import streamlit as st
 import pandas as pd
 from datetime import date, datetime, timedelta
 from dateutil.relativedelta import relativedelta
+from services.payment_service import PaymentService
+from services.database import SupabaseDB
 import logging
-
-# 安全 import
-try:
-    from components.cards import section_header, metric_card, empty_state, data_table, info_card
-except ImportError:
-    def section_header(title, icon="", divider=True):
-        st.markdown(f"### {icon} {title}")
-        if divider: st.divider()
-    
-    def metric_card(label, value, delta="", icon="", color="normal"):
-        st.metric(label, value, delta)
-    
-    def empty_state(msg, icon="", desc=""):
-        st.info(f"{icon} {msg}")
-    
-    def data_table(df, key="table"):
-        st.dataframe(df, use_container_width=True, key=key)
-    
-    def info_card(title, content, icon="", type="info"):
-        st.info(f"{icon} {title}: {content}")
-
-try:
-    from config.constants import PAYMENT
-except ImportError:
-    class PAYMENT:
-        DEFAULT_WATER_FEE = 100
-        METHODS = ["月繳", "半年繳", "年繳"]
 
 logger = logging.getLogger(__name__)
 
-
-# ============== 租金計算邏輯（已修正）==============
-
-def calculate_monthly_rent(tenant: dict) -> float:
-    """
-    計算實際每月應收租金（修正版）
+def render_rent_page():
+    """租金管理主頁面"""
+    st.set_page_config(page_title="💰 租金管理", layout="wide")
+    st.title("💰 租金管理系統")
     
-    業務邏輯說明:
-    1. base_rent 是房客資料中填寫的「基礎月租」：
-       - 如果房客要付水費：填 4100（已包含水費100）
-       - 如果房客不用付水費（房東提供優惠）：填 4000（不含水費）
+    # 初始化 Service 和 Database
+    service = PaymentService()
+    db = SupabaseDB()
     
-    2. has_water_fee 欄位意義：
-       - True = 房東提供水費優惠，base_rent 不含水費（例如4000）
-       - False = 房客需付水費，base_rent 已包含水費（例如4100）
-       
-       → 所以不需要再做任何加減，直接使用 base_rent
+    # 建立 Tab
+    tab1, tab2, tab3, tab4 = st.tabs(["📅 建立排程", "📊 本月摘要", "💳 收款管理", "📈 報表分析"])
     
-    3. 年繳優惠計算：
-       - 月租 5000，年繳優惠 1 個月
-       - 實際收款 = 5000 × 11 = 55000（只收11個月）
-       - 分攤到12個月 = 55000 ÷ 12 = 4583.33 → 4583
+    with tab1:
+        render_schedule_tab(service, db)
     
-    Args:
-        tenant: 房客資料字典，需包含:
-            - base_rent: 基礎月租
-            - payment_method: 繳款方式
-            - annual_discount_months: 年繳折扣月數
+    with tab2:
+        render_summary_tab(service, db)
     
-    Returns:
-        每月應收金額（四捨五入到整數）
-    """
-    base_rent = float(tenant.get('base_rent', 0))
-    payment_method = tenant.get('payment_method', '月繳')
-    annual_discount_months = int(tenant.get('annual_discount_months', 0))
+    with tab3:
+        render_payment_tab(service, db)
     
-    # ========== 年繳優惠處理 ==========
-    if payment_method == '年繳' and annual_discount_months > 0:
-        # 計算年繳實際收款金額
-        months_to_pay = 12 - annual_discount_months  # 例如優惠1個月 → 收11個月
-        annual_total = base_rent * months_to_pay     # 例如 5000 × 11 = 55000
-        monthly_amount = annual_total / 12            # 例如 55000 ÷ 12 = 4583.33
-    else:
-        # 月繳/半年繳：直接使用 base_rent
-        monthly_amount = base_rent
-    
-    # ========== 水費處理 ==========
-    # base_rent 已經是「實際要收的金額」：
-    # - 如果 has_water_fee = True：base_rent 不含水費（例如 4000）
-    # - 如果 has_water_fee = False：base_rent 已含水費（例如 4100）
-    # 所以不需要再做任何加減
-    
-    return round(monthly_amount, 0)
+    with tab4:
+        render_report_tab(service, db)
 
 
-def calculate_rent_detail(tenant: dict) -> dict:
-    """
-    計算租金明細（用於顯示）
+def render_schedule_tab(service: PaymentService, db: SupabaseDB):
+    """Tab 1: 建立排程"""
+    st.subheader("📅 批量建立月租金排程")
     
-    Returns:
-        {
-            'base_rent': 基礎月租,
-            'monthly_rent': 每月實際應收,
-            'has_water_discount': 是否有水費優惠,
-            'annual_discount_months': 年繳優惠月數,
-            'annual_total': 年繳總額（如適用）,
-            'payment_method': 繳款方式
-        }
-    """
-    base_rent = float(tenant.get('base_rent', 0))
-    has_water_fee = tenant.get('has_water_fee', False)
-    payment_method = tenant.get('payment_method', '月繳')
-    annual_discount_months = int(tenant.get('annual_discount_months', 0))
-    
-    # 計算實際每月應收
-    monthly_rent = calculate_monthly_rent(tenant)
-    
-    # 年繳總額
-    annual_total = 0
-    if payment_method == '年繳':
-        if annual_discount_months > 0:
-            months_to_pay = 12 - annual_discount_months
-            annual_total = base_rent * months_to_pay
-        else:
-            annual_total = base_rent * 12
-    
-    return {
-        'base_rent': base_rent,
-        'monthly_rent': monthly_rent,
-        'has_water_discount': has_water_fee,
-        'annual_discount_months': annual_discount_months,
-        'annual_total': annual_total,
-        'payment_method': payment_method
-    }
-
-
-def generate_schedule_list(tenant: dict, start_date: date, months: int) -> list:
-    """
-    生成應收單列表
-    
-    Args:
-        tenant: 房客資料
-        start_date: 開始日期
-        months: 月數
-    
-    Returns:
-        應收單列表
-    """
-    schedules = []
-    
-    # 計算實際每月應收金額
-    monthly_rent = calculate_monthly_rent(tenant)
-    
-    for i in range(months):
-        target_date = start_date + relativedelta(months=i)
-        schedules.append({
-            'room_number': tenant['room_number'],
-            'tenant_name': tenant['tenant_name'],
-            'payment_year': target_date.year,
-            'payment_month': target_date.month,
-            'amount': monthly_rent,  # 使用計算後的金額
-            'payment_method': tenant['payment_method'],
-            'due_date': date(target_date.year, target_date.month, 5)
-        })
-    
-    return schedules
-
-
-# ============== Tab 1: 單筆預填 ==============
-
-def render_single_tab(db):
-    """單筆預填"""
-    section_header("單筆預填應收單", "📝")
-    
-    # 取得房客
-    try:
-        df_tenants = db.get_tenants()
-    except Exception as e:
-        st.error(f"❌ 載入房客失敗: {e}")
-        return
-    
-    if df_tenants.empty:
-        empty_state("沒有房客資料", "👥", "請先在「房客管理」新增房客")
-        return
-    
-    # 選擇房客
-    tenant_options = {
-        f"{row['room_number']} - {row['tenant_name']}": row
-        for _, row in df_tenants.iterrows()
-    }
-    
-    selected = st.selectbox(
-        "選擇房客",
-        list(tenant_options.keys()),
-        key="single_tenant"
-    )
-    
-    tenant = tenant_options[selected]
-    st.divider()
-    
-    # 顯示房客資訊
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        metric_card("房號", tenant['room_number'], icon="🏠")
-    
-    with col2:
-        metric_card("基礎月租", f"${tenant['base_rent']:,}", icon="💰")
-    
-    with col3:
-        water_text = "✅ 有優惠" if tenant.get('has_water_fee', False) else "❌ 無優惠"
-        metric_card("水費優惠", water_text, icon="💧")
-    
-    with col4:
-        metric_card("繳款方式", tenant['payment_method'], icon="📋")
-    
-    # 計算租金明細
-    rent_detail = calculate_rent_detail(tenant.to_dict())
-    
-    # 顯示計算明細
-    detail_text = f"""
-💰 **租金計算明細**
-
-- 基礎月租: ${rent_detail['base_rent']:,.0f}
-- 水費優惠: {'✅ 有（base_rent 不含水費）' if rent_detail['has_water_discount'] else '❌ 無（base_rent 已含水費）'}
-"""
-    
-    if rent_detail['payment_method'] == '年繳' and rent_detail['annual_discount_months'] > 0:
-        detail_text += f"""
-- 年繳優惠: {rent_detail['annual_discount_months']} 個月
-- 年繳總額: ${rent_detail['annual_total']:,.0f}（收 {12 - rent_detail['annual_discount_months']} 個月）
-- **每月應收**: ${rent_detail['monthly_rent']:,.0f}（= ${rent_detail['annual_total']:,.0f} ÷ 12）
-"""
-    else:
-        detail_text += f"""
-- **每月應收**: ${rent_detail['monthly_rent']:,.0f}
-"""
-    
-    st.info(detail_text)
-    st.divider()
-    
-    # 輸入期間
-    col_a, col_b, col_c = st.columns(3)
-    
-    with col_a:
-        year = st.number_input(
-            "年份",
-            min_value=2020,
-            max_value=2030,
-            value=date.today().year,
-            key="single_year"
-        )
-    
-    with col_b:
-        month = st.selectbox(
-            "月份",
-            range(1, 13),
-            index=date.today().month - 1,
-            key="single_month"
-        )
-    
-    with col_c:
-        due_day = st.number_input(
-            "到期日",
-            min_value=1,
-            max_value=28,
-            value=5,
-            key="single_due"
-        )
-    
-    # 檢查是否已存在
-    already_exists = db.check_payment_exists(tenant['room_number'], year, month)
-    
-    if already_exists:
-        st.warning(f"⚠️ {year}/{month} 的應收單已存在")
-    
-    # 預填按鈕
-    if st.button("✅ 預填應收單", type="primary", disabled=already_exists):
-        due_date = date(year, month, due_day)
-        
-        # 使用計算後的金額
-        monthly_rent = calculate_monthly_rent(tenant.to_dict())
-        
-        ok, msg = db.add_payment_schedule(
-            tenant['room_number'],
-            tenant['tenant_name'],
-            year,
-            month,
-            monthly_rent,  # 使用正確計算的金額
-            tenant['payment_method'],
-            due_date
-        )
-        
-        if ok:
-            st.success(f"✅ {msg}\n\n**應收金額**: ${monthly_rent:,.0f}")
-            st.balloons()
-        else:
-            st.error(msg)
-
-
-# ============== Tab 2: 批量預填 ==============
-
-def render_batch_tab(db):
-    """批量預填"""
-    section_header("批量預填應收單", "📋")
-    
-    # 取得房客
-    try:
-        df_tenants = db.get_tenants()
-    except Exception as e:
-        st.error(f"❌ 載入房客失敗: {e}")
-        return
-    
-    if df_tenants.empty:
-        empty_state("沒有房客資料", "👥")
-        return
-    
-    st.info(f"📊 當前有 **{len(df_tenants)}** 個房客")
-    
-    # 設定
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        start_year = st.number_input(
-            "開始年份",
+        year = st.number_input(
+            "年份",
+            value=datetime.now().year,
             min_value=2020,
             max_value=2030,
-            value=date.today().year,
-            key="batch_year"
+            key="schedule_year"
         )
     
     with col2:
-        start_month = st.selectbox(
-            "開始月份",
-            range(1, 13),
-            index=date.today().month - 1,
-            key="batch_month"
+        month = st.number_input(
+            "月份",
+            value=datetime.now().month,
+            min_value=1,
+            max_value=12,
+            key="schedule_month"
         )
     
     with col3:
-        months_count = st.number_input(
-            "產生月數",
-            min_value=1,
-            max_value=24,
-            value=6,
-            key="batch_months"
-        )
-    
-    # 選項
-    col_a, col_b = st.columns(2)
-    
-    with col_a:
-        skip_existing = st.checkbox(
-            "跳過已存在的應收單",
-            value=True,
-            key="batch_skip"
-        )
-    
-    with col_b:
-        filter_rooms = st.multiselect(
-            "僅處理特定房號 (不選則全部)",
-            df_tenants['room_number'].tolist(),
-            key="batch_rooms"
-        )
+        st.empty()
     
     st.divider()
     
-    # 預覽
-    start_date = date(start_year, start_month, 1)
-    preview_periods = []
-    for i in range(min(months_count, 6)):  # 最多預覽 6 個月
-        target_date = start_date + relativedelta(months=i)
-        preview_periods.append(f"{target_date.year}/{target_date.month}")
-    
-    if months_count > 6:
-        preview_periods.append("...")
-    
-    st.write(f"**將生成期間:** {' → '.join(preview_periods)}")
-    
-    # 過濾房客
-    filtered_tenants = df_tenants.copy()
-    if filter_rooms:
-        filtered_tenants = filtered_tenants[filtered_tenants['room_number'].isin(filter_rooms)]
-    
-    st.write(f"**將處理房客數:** {len(filtered_tenants)} 個")
-    
-    # 預覽金額
-    st.divider()
-    st.write("### 📋 應收金額預覽")
-    
-    preview_data = []
-    for _, tenant in filtered_tenants.iterrows():
-        rent_detail = calculate_rent_detail(tenant.to_dict())
-        preview_data.append({
-            '房號': tenant['room_number'],
-            '房客': tenant['tenant_name'],
-            '繳款方式': tenant['payment_method'],
-            '基礎月租': f"${tenant['base_rent']:,.0f}",
-            '每月應收': f"${rent_detail['monthly_rent']:,.0f}",
-            '水費優惠': '✅' if rent_detail['has_water_discount'] else '❌',
-            '年繳優惠': f"{rent_detail['annual_discount_months']}月" if rent_detail['annual_discount_months'] > 0 else '-'
-        })
-    
-    preview_df = pd.DataFrame(preview_data)
-    st.dataframe(preview_df, use_container_width=True, hide_index=True)
+    # 建立排程按鈕
+    if st.button("🚀 一鍵建立排程", type="primary", use_container_width=False):
+        with st.spinner(f"正在建立 {year} 年 {month} 月的租金排程..."):
+            try:
+                results = service.create_monthly_schedule(year, month)
+                
+                # 顯示結果
+                col_result1, col_result2, col_result3 = st.columns(3)
+                with col_result1:
+                    st.metric("✅ 新增筆數", results['created'])
+                with col_result2:
+                    st.metric("⏭️ 跳過筆數", results['skipped'])
+                with col_result3:
+                    st.metric("❌ 失敗筆數", results['errors'])
+                
+                if results['created'] > 0:
+                    st.success(f"✅ 成功建立 {results['created']} 筆租金排程！")
+                    st.balloons()
+                
+                if results['skipped'] > 0:
+                    st.info(f"⏭️ 跳過 {results['skipped']} 筆已存在的排程")
+                
+                if results['errors'] > 0:
+                    st.warning(f"⚠️ {results['errors']} 筆建立失敗，請查看日誌")
+            
+            except Exception as e:
+                st.error(f"❌ 建立失敗：{str(e)}")
+                logger.error(f"Create schedule error: {e}")
     
     st.divider()
     
-    # 批量生成
-    if st.button("🚀 開始批量生成", type="primary"):
-        with st.spinner("處理中..."):
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            all_schedules = []
-            
-            # 生成所有應收單
-            for idx, (_, tenant) in enumerate(filtered_tenants.iterrows()):
-                status_text.text(f"準備資料: {tenant['room_number']} - {tenant['tenant_name']}")
-                
-                schedules = generate_schedule_list(
-                    tenant,
-                    start_date,
-                    months_count
-                )
-                
-                all_schedules.extend(schedules)
-                progress_bar.progress((idx + 1) / len(filtered_tenants) * 0.5)
-            
-            # 批量插入
-            status_text.text("批量寫入資料庫...")
-            
-            if skip_existing:
-                # 過濾已存在的
-                filtered_schedules = []
-                for schedule in all_schedules:
-                    if not db.check_payment_exists(
-                        schedule['room_number'],
-                        schedule['payment_year'],
-                        schedule['payment_month']
-                    ):
-                        filtered_schedules.append(schedule)
-                
-                skipped = len(all_schedules) - len(filtered_schedules)
-                all_schedules = filtered_schedules
-            else:
-                skipped = 0
-            
-            # 執行批量插入
-            success, skip, fail = db.batch_create_payment_schedule(all_schedules)
-            
-            progress_bar.progress(1.0)
-            status_text.empty()
-            progress_bar.empty()
-            
-            # 顯示結果
-            st.success(f"""
-✅ **批量生成完成！**
-
-- 成功建立: **{success}** 筆
-- 跳過已存在: **{skip + skipped}** 筆
-- 失敗: **{fail}** 筆
-            """)
-            
-            if success > 0:
-                st.balloons()
-
-
-# ============== Tab 3: 繳費確認 ==============
-
-def render_payment_tab(db):
-    """繳費確認"""
-    section_header("繳費確認", "✅")
+    # 顯示預計建立的排程預覽
+    st.subheader("📋 預計建立的排程預覽")
     
-    # 篩選
+    try:
+        tenants_df = db.get_tenants()
+        
+        if not tenants_df.empty:
+            preview_data = []
+            for idx, tenant in tenants_df.iterrows():
+                rent_detail = service.calculate_rent_detail(tenant.to_dict())
+                preview_data.append({
+                    "房號": tenant['room_number'],
+                    "房客": tenant['tenant_name'],
+                    "基本月租": f"${tenant['base_rent']:,.0f}",
+                    "計算月租": f"${rent_detail['monthly_rent']:,.0f}",
+                    "繳款方式": tenant.get('payment_method', '月繳'),
+                    "狀態": "✅ 有效" if tenant.get('is_active', True) else "❌ 已停用"
+                })
+            
+            preview_df = pd.DataFrame(preview_data)
+            st.dataframe(preview_df, use_container_width=True, hide_index=True)
+            st.info(f"📌 共 {len(preview_data)} 位房客")
+        else:
+            st.info("📌 目前沒有房客資料，請先新增房客")
+    
+    except Exception as e:
+        st.warning(f"無法顯示預覽：{str(e)}")
+
+
+def render_summary_tab(service: PaymentService, db: SupabaseDB):
+    """Tab 2: 本月摘要"""
+    st.subheader("📊 本月收款摘要")
+    
+    current_year = datetime.now().year
+    current_month = datetime.now().month
+    
+    try:
+        summary = service.get_payment_summary(current_year, current_month)
+        
+        # 顯示四個關鍵指標
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric(
+                "💰 應收總額",
+                f"${summary['total_expected']:,.0f}"
+            )
+        
+        with col2:
+            delta_value = summary['total_expected'] - summary['total_received']
+            st.metric(
+                "✅ 實收總額",
+                f"${summary['total_received']:,.0f}",
+                delta=f"差 ${delta_value:,.0f}"
+            )
+        
+        with col3:
+            st.metric(
+                "📊 收款率",
+                f"{summary['collection_rate']:.1%}"
+            )
+        
+        with col4:
+            unpaid_total = summary['unpaid_count'] + summary['overdue_count']
+            st.metric(
+                "⚠️ 待繳筆數",
+                f"{unpaid_total}",
+                delta=f"逾期 {summary['overdue_count']}"
+            )
+        
+        st.divider()
+        
+        # 詳細數據表
+        st.subheader("📋 待繳清單")
+        
+        unpaid_df = db.get_payment_schedule(
+            year=current_year,
+            month=current_month,
+            status='unpaid'
+        )
+        
+        if not unpaid_df.empty:
+            display_df = unpaid_df[['room_number', 'tenant_name', 'amount', 'due_date', 'status']].copy()
+            display_df.columns = ['房號', '房客', '金額', '到期日期', '狀態']
+            display_df['金額'] = display_df['金額'].apply(lambda x: f"${x:,.0f}")
+            display_df['狀態'] = display_df['狀態'].apply(lambda x: '⏰ 待繳' if x == 'unpaid' else '⚠️ 逾期')
+            
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+        else:
+            st.success("✅ 本月所有租金都已收齊！")
+        
+        # 逾期清單
+        st.subheader("⚠️ 逾期清單")
+        overdue_df = db.get_payment_schedule(
+            year=current_year,
+            month=current_month,
+            status='overdue'
+        )
+        
+        if not overdue_df.empty:
+            overdue_display = overdue_df[['room_number', 'tenant_name', 'amount', 'due_date']].copy()
+            overdue_display.columns = ['房號', '房客', '金額', '到期日期']
+            overdue_display['金額'] = overdue_display['金額'].apply(lambda x: f"${x:,.0f}")
+            
+            st.dataframe(overdue_display, use_container_width=True, hide_index=True)
+        else:
+            st.success("✅ 沒有逾期記錄")
+    
+    except Exception as e:
+        st.error(f"❌ 獲取摘要資料失敗：{str(e)}")
+        logger.error(f"Get summary error: {e}")
+
+
+def render_payment_tab(service: PaymentService, db: SupabaseDB):
+    """Tab 3: 收款管理"""
+    st.subheader("💳 收款管理")
+    
+    # 篩選器
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
@@ -505,293 +232,356 @@ def render_payment_tab(db):
     with col3:
         filter_status = st.selectbox(
             "狀態",
-            [None, "未繳", "已繳"],
-            format_func=lambda x: "全部" if x is None else x,
+            [None, 'unpaid', 'paid', 'overdue'],
+            format_func=lambda x: "全部" if x is None else {'unpaid': '待繳', 'paid': '已繳', 'overdue': '逾期'}.get(x),
             key="pay_status"
         )
     
     with col4:
+        tenants_list = db.get_tenants()
         filter_room = st.selectbox(
             "房號",
-            [None] + db.get_tenants()['room_number'].tolist() if not db.get_tenants().empty else [None],
-            format_func=lambda x: "全部" if x is None else x,
+            [None] + (tenants_list['room_number'].tolist() if not tenants_list.empty else []),
+            format_func=lambda x: "全部" if x is None else str(x),
             key="pay_room"
         )
     
-    # 查詢
-    df = db.get_payment_schedule(
-        year=filter_year,
-        month=filter_month,
-        room=filter_room,
-        status=filter_status
-    )
-    
-    if df.empty:
-        empty_state("沒有符合條件的應收單", "📭")
-        return
-    
-    # 統計
-    stats = db.get_payment_statistics(filter_year, filter_month)
-    
-    col_s1, col_s2, col_s3, col_s4 = st.columns(4)
-    
-    with col_s1:
-        metric_card(
-            "應收總額",
-            f"${stats.get('total_amount', 0):,.0f}",
-            icon="💰",
-            color="normal"
-        )
-    
-    with col_s2:
-        metric_card(
-            "已收金額",
-            f"${stats.get('paid_amount', 0):,.0f}",
-            icon="✅",
-            color="success"
-        )
-    
-    with col_s3:
-        metric_card(
-            "未收金額",
-            f"${stats.get('unpaid_amount', 0):,.0f}",
-            icon="⚠️",
-            color="warning"
-        )
-    
-    with col_s4:
-        metric_card(
-            "收款率",
-            f"{stats.get('payment_rate', 0):.1f}%",
-            icon="📊",
-            color="normal"
-        )
-    
     st.divider()
     
-    # 批量操作
-    unpaid_df = df[df['status'] == '未繳']
-    
-    if not unpaid_df.empty:
-        section_header("批量操作", "⚡", divider=False)
-        
-        selected_ids = st.multiselect(
-            "選擇要標記的應收單",
-            unpaid_df['id'].tolist(),
-            format_func=lambda x: f"{unpaid_df[unpaid_df['id']==x]['room_number'].values[0]} - {unpaid_df[unpaid_df['id']==x]['payment_year'].values[0]}/{unpaid_df[unpaid_df['id']==x]['payment_month'].values[0]}",
-            key="batch_mark_ids"
+    try:
+        # 取得篩選後的資料
+        df = db.get_payment_schedule(
+            year=filter_year,
+            month=filter_month,
+            status=filter_status,
+            room=filter_room
         )
         
-        col_mark, col_clear = st.columns([1, 3])
+        if df.empty:
+            st.info("📌 沒有符合條件的記錄")
+            return
         
-        with col_mark:
-            if st.button("✅ 批量標記已繳", disabled=len(selected_ids) == 0):
-                success, fail = db.batch_mark_paid(selected_ids)
-                if success > 0:
-                    st.success(f"✅ 成功標記 {success} 筆")
-                    st.rerun()
-                if fail > 0:
-                    st.error(f"❌ 失敗 {fail} 筆")
+        # 顯示統計資訊
+        stats = service.get_payment_summary(
+            filter_year or datetime.now().year,
+            filter_month or datetime.now().month
+        )
+        
+        col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
+        with col_stat1:
+            st.metric("應收", f"${stats['total_expected']:,.0f}")
+        with col_stat2:
+            st.metric("實收", f"${stats['total_received']:,.0f}")
+        with col_stat3:
+            st.metric("待繳", f"${stats['total_expected'] - stats['total_received']:,.0f}")
+        with col_stat4:
+            st.metric("收款率", f"{stats['collection_rate']:.1%}")
         
         st.divider()
-    
-    # 列表
-    section_header("應收單列表", "📋", divider=False)
-    st.write(f"共 {len(df)} 筆")
-    
-    # 格式化
-    display_df = df.copy()
-    display_df['期間'] = display_df.apply(
-        lambda x: f"{x['payment_year']}/{x['payment_month']}", axis=1
-    )
-    display_df['應收'] = display_df['amount'].apply(lambda x: f"${x:,.0f}")
-    display_df['實收'] = display_df['paid_amount'].apply(lambda x: f"${x:,.0f}")
-    
-    cols_to_show = ['id', '房號', '房客名稱', '期間', '應收', '實收', '繳款方式', '狀態']
-    rename = {
-        'room_number': '房號',
-        'tenant_name': '房客名稱',
-        'payment_method': '繳款方式',
-        'status': '狀態'
-    }
-    
-    display_df = display_df.rename(columns=rename)
-    
-    # 顯示表格
-    data_table(display_df[cols_to_show], key="payment_list")
-    
-    # 快速標記
-    st.divider()
-    section_header("快速標記", "⚡", divider=False)
-    
-    if not unpaid_df.empty:
-        for _, row in unpaid_df.head(10).iterrows():  # 只顯示前 10 筆
-            col_info, col_btn1, col_btn2 = st.columns([3, 1, 1])
+        
+        # 顯示詳細列表
+        st.subheader("📋 詳細清單")
+        
+        display_df = df[['id', 'room_number', 'tenant_name', 'payment_year', 'payment_month', 'amount', 'due_date', 'status']].copy()
+        display_df.columns = ['ID', '房號', '房客', '年', '月', '金額', '到期日', '狀態']
+        display_df['金額'] = display_df['金額'].apply(lambda x: f"${x:,.0f}")
+        display_df['狀態'] = display_df['狀態'].apply(lambda x: {'unpaid': '⏰ 待繳', 'paid': '✅ 已繳', 'overdue': '⚠️ 逾期'}.get(x, x))
+        
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        
+        # 批量標記為已繳
+        st.divider()
+        st.subheader("✅ 批量標記為已繳")
+        
+        unpaid_df = db.get_payment_schedule(status='unpaid')
+        
+        if not unpaid_df.empty:
+            selected_ids = st.multiselect(
+                "選擇要標記的記錄",
+                unpaid_df['id'].tolist(),
+                format_func=lambda x: f"{unpaid_df[unpaid_df['id'] == x]['room_number'].values[0]} - {unpaid_df[unpaid_df['id'] == x]['tenant_name'].values[0]} ({unpaid_df[unpaid_df['id'] == x]['payment_year'].values[0]}/{unpaid_df[unpaid_df['id'] == x]['payment_month'].values[0]})",
+                key="batch_mark_ids"
+            )
             
-            with col_info:
-                st.write(
-                    f"**{row['room_number']}** {row['tenant_name']} | "
-                    f"{row['payment_year']}/{row['payment_month']} | "
-                    f"${row['amount']:,}"
-                )
+            col_mark_btn, col_paid_amount, col_paid_date = st.columns(3)
             
-            with col_btn1:
-                if st.button("✅", key=f"mark_{row['id']}"):
-                    if db.mark_payment_done(row['id']):
-                        st.success("✅")
-                        st.rerun()
-            
-            with col_btn2:
-                if st.button("🗑️", key=f"del_{row['id']}"):
-                    if st.session_state.get(f'confirm_del_{row["id"]}'):
-                        ok, msg = db.delete_payment_schedule(row['id'])
-                        if ok:
-                            st.success("✅")
-                            del st.session_state[f'confirm_del_{row["id"]}']
-                            st.rerun()
+            with col_mark_btn:
+                if st.button("✅ 確認標記", type="primary"):
+                    if len(selected_ids) > 0:
+                        paid_amount = col_paid_amount.number_input("繳款金額", min_value=0, step=100, key="paid_amt")
+                        paid_date = col_paid_date.date_input("繳款日期", value=date.today(), key="paid_dt")
+                        
+                        if paid_amount > 0:
+                            try:
+                                with st.spinner("正在標記..."):
+                                    success_count = 0
+                                    fail_count = 0
+                                    
+                                    for payment_id in selected_ids:
+                                        try:
+                                            result = service.mark_as_paid(
+                                                payment_id,
+                                                paid_amount,
+                                                datetime.combine(paid_date, datetime.min.time())
+                                            )
+                                            if result:
+                                                success_count += 1
+                                            else:
+                                                fail_count += 1
+                                        except Exception as e:
+                                            fail_count += 1
+                                            logger.error(f"Mark payment {payment_id} failed: {e}")
+                                    
+                                    if success
+_count > 0:
+                                        st.success(f"✅ 成功標記 {success_count} 筆為已繳！")
+                                    if fail_count > 0:
+                                        st.warning(f"⚠️ {fail_count} 筆標記失敗")
+                                    st.rerun()
+                            
+                            except Exception as e:
+                                st.error(f"❌ 標記失敗：{str(e)}")
+                                logger.error(f"Mark as paid error: {e}")
+                        else:
+                            st.warning("請輸入繳款金額")
                     else:
-                        st.session_state[f'confirm_del_{row["id"]}'] = True
-                        st.warning("再按一次確認")
-    else:
-        st.success("✅ 全部已繳清")
-
-
-# ============== Tab 4: 財報統計 ==============
-
-def render_report_tab(db):
-    """財報統計"""
-    section_header("財務報表", "📊")
+                        st.warning("請先選擇要標記的記錄")
+        else:
+            st.success("✅ 所有租金都已收齊！")
     
-    # 選擇年份
-    col1, col2 = st.columns(2)
+    except Exception as e:
+        st.error(f"❌ 獲取資料失敗：{str(e)}")
+        logger.error(f"Get payment data error: {e}")
+
+
+def render_report_tab(service: PaymentService, db: SupabaseDB):
+    """Tab 4: 報表分析"""
+    st.subheader("📈 收款報表分析")
+    
+    col1, col2, col3 = st.columns(3)
     
     with col1:
         report_year = st.selectbox(
-            "年份",
+            "選擇年份",
             range(2020, 2031),
-            index=date.today().year - 2020,
+            index=datetime.now().year - 2020,
             key="report_year"
         )
     
     with col2:
+        report_month = st.selectbox(
+            "選擇月份",
+            range(1, 13),
+            index=datetime.now().month - 1,
+            key="report_month"
+        )
+    
+    with col3:
         report_type = st.radio(
             "報表類型",
-            ["月度報表", "年度趨勢"],
+            ["月度摘要", "年度趨勢", "房客對比"],
             horizontal=True,
             key="report_type"
         )
     
     st.divider()
     
-    if report_type == "月度報表":
-        # 月度報表
-        month = st.selectbox("月份", range(1, 13), index=date.today().month - 1, key="report_month")
+    try:
+        if report_type == "月度摘要":
+            render_monthly_report(service, db, report_year, report_month)
         
-        stats = db.get_payment_statistics(report_year, month)
+        elif report_type == "年度趨勢":
+            render_annual_report(service, db, report_year)
         
-        if stats.get('total_count', 0) == 0:
-            empty_state(f"{report_year}/{month} 沒有應收單", "📭")
-            return
-        
-        # 統計卡片
-        col_a, col_b, col_c = st.columns(3)
-        
-        with col_a:
-            metric_card("應收總額", f"${stats['total_amount']:,.0f}", icon="💰")
-        
-        with col_b:
-            metric_card("已收金額", f"${stats['paid_amount']:,.0f}", icon="✅", color="success")
-        
-        with col_c:
-            metric_card("收款率", f"{stats['payment_rate']:.1f}%", icon="📊")
-        
-        # 取得明細
-        df = db.get_payment_schedule(year=report_year, month=month)
-        
-        if not df.empty:
-            st.divider()
-            st.write("**各房號明細**")
-            
-            summary = df.groupby('room_number').agg({
-                'amount': 'sum',
-                'paid_amount': 'sum'
-            }).reset_index()
-            
-            summary['未收'] = summary['amount'] - summary['paid_amount']
-            summary.columns = ['房號', '應收', '已收', '未收']
-            
-            # 圖表
-            st.bar_chart(summary.set_index('房號')[['已收', '未收']])
-            
-            # 表格
-            data_table(summary, key="monthly_detail")
+        elif report_type == "房客對比":
+            render_tenant_comparison(service, db, report_year, report_month)
     
+    except Exception as e:
+        st.error(f"❌ 報表生成失敗：{str(e)}")
+        logger.error(f"Report generation error: {e}")
+
+
+def render_monthly_report(service: PaymentService, db: SupabaseDB, year: int, month: int):
+    """月度摘要報表"""
+    st.subheader(f"📊 {year} 年 {month} 月 收款摘要")
+    
+    summary = service.get_payment_summary(year, month)
+    
+    if summary['total_expected'] == 0:
+        st.info("📌 該月份沒有資料")
+        return
+    
+    # 關鍵指標
+    col_k1, col_k2, col_k3, col_k4 = st.columns(4)
+    
+    with col_k1:
+        st.metric("💰 應收總額", f"${summary['total_expected']:,.0f}")
+    
+    with col_k2:
+        st.metric("✅ 實收總額", f"${summary['total_received']:,.0f}")
+    
+    with col_k3:
+        st.metric("⏰ 待繳金額", f"${summary['total_expected'] - summary['total_received']:,.0f}")
+    
+    with col_k4:
+        st.metric("📊 收款率", f"{summary['collection_rate']:.1%}")
+    
+    st.divider()
+    
+    # 清單
+    st.subheader("詳細清單")
+    df = db.get_payment_schedule(year=year, month=month)
+    
+    if not df.empty:
+        display_df = df[['room_number', 'tenant_name', 'amount', 'paid_amount', 'due_date', 'status']].copy()
+        display_df.columns = ['房號', '房客', '應繳金額', '實繳金額', '到期日', '狀態']
+        display_df['應繳金額'] = display_df['應繳金額'].apply(lambda x: f"${x:,.0f}")
+        display_df['實繳金額'] = display_df['實繳金額'].apply(lambda x: f"${x:,.0f}" if x else "$0")
+        display_df['狀態'] = display_df['狀態'].apply(lambda x: {'unpaid': '⏰ 待繳', 'paid': '✅ 已繳', 'overdue': '⚠️ 逾期'}.get(x, x))
+        
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+    
+    # 下載報表
+    if not df.empty:
+        csv = df.to_csv(index=False)
+        st.download_button(
+            label="📥 下載 CSV 報表",
+            data=csv,
+            file_name=f"rent_report_{year}_{month:02d}.csv",
+            mime="text/csv"
+        )
+
+
+def render_annual_report(service: PaymentService, db: SupabaseDB, year: int):
+    """年度趨勢報表"""
+    st.subheader(f"📈 {year} 年 收款趨勢")
+    
+    # 收集全年數據
+    monthly_data = []
+    for month in range(1, 13):
+        summary = service.get_payment_summary(year, month)
+        if summary['total_expected'] > 0:
+            monthly_data.append({
+                '月份': month,
+                '應收': summary['total_expected'],
+                '實收': summary['total_received'],
+                '待繳': summary['total_expected'] - summary['total_received'],
+                '收款率': summary['collection_rate']
+            })
+    
+    if not monthly_data:
+        st.info("📌 該年份沒有資料")
+        return
+    
+    trend_df = pd.DataFrame(monthly_data)
+    
+    # 顯示關鍵指標
+    col_annual1, col_annual2, col_annual3 = st.columns(3)
+    
+    with col_annual1:
+        st.metric("全年應收", f"${trend_df['應收'].sum():,.0f}")
+    
+    with col_annual2:
+        st.metric("全年實收", f"${trend_df['實收'].sum():,.0f}")
+    
+    with col_annual3:
+        avg_rate = (trend_df['實收'].sum() / trend_df['應收'].sum()) if trend_df['應收'].sum() > 0 else 0
+        st.metric("平均收款率", f"{avg_rate:.1%}")
+    
+    st.divider()
+    
+    # 趨勢圖表
+    col_chart1, col_chart2 = st.columns(2)
+    
+    with col_chart1:
+        st.subheader("💰 應收 vs 實收趨勢")
+        st.line_chart(trend_df.set_index('月份')[['應收', '實收']])
+    
+    with col_chart2:
+        st.subheader("📊 收款率趨勢")
+        rate_data = trend_df[['月份', '收款率']].copy()
+        rate_data['收款率'] = rate_data['收款率'] * 100
+        st.line_chart(rate_data.set_index('月份'))
+    
+    st.divider()
+    
+    # 月份對比表
+    st.subheader("📋 月份對比表")
+    display_annual = trend_df.copy()
+    display_annual['應收'] = display_annual['應收'].apply(lambda x: f"${x:,.0f}")
+    display_annual['實收'] = display_annual['實收'].apply(lambda x: f"${x:,.0f}")
+    display_annual['待繳'] = display_annual['待繳'].apply(lambda x: f"${x:,.0f}")
+    display_annual['收款率'] = display_annual['收款率'].apply(lambda x: f"{x:.1%}")
+    
+    st.dataframe(display_annual, use_container_width=True, hide_index=True)
+
+
+def render_tenant_comparison(service: PaymentService, db: SupabaseDB, year: int, month: int):
+    """房客對比報表"""
+    st.subheader(f"👥 {year} 年 {month} 月 房客對比分析")
+    
+    df = db.get_payment_schedule(year=year, month=month)
+    
+    if df.empty:
+        st.info("📌 該月份沒有資料")
+        return
+    
+    # 按房客統計
+    tenant_stats = df.groupby('tenant_name').agg({
+        'room_number': 'first',
+        'amount': 'sum',
+        'paid_amount': lambda x: x.sum() if x.sum() else 0,
+        'status': lambda x: 'paid' if all(s == 'paid' for s in x) else ('overdue' if any(s == 'overdue' for s in x) else 'unpaid')
+    }).reset_index()
+    
+    tenant_stats['待繳'] = tenant_stats['amount'] - tenant_stats['paid_amount']
+    tenant_stats['完成度'] = (tenant_stats['paid_amount'] / tenant_stats['amount']).apply(lambda x: f"{x:.1%}")
+    
+    # 按待繳金額排序
+    tenant_stats = tenant_stats.sort_values('待繳', ascending=False)
+    
+    # 關鍵指標
+    col_t1, col_t2, col_t3 = st.columns(3)
+    
+    with col_t1:
+        st.metric("📌 總房客數", len(tenant_stats))
+    
+    with col_t2:
+        paid_count = (tenant_stats['待繳'] == 0).sum()
+        st.metric("✅ 已繳房客", paid_count)
+    
+    with col_t3:
+        unpaid_count = (tenant_stats['待繳'] > 0).sum()
+        st.metric("⏰ 待繳房客", unpaid_count)
+    
+    st.divider()
+    
+    # 顯示對比表
+    st.subheader("📊 房客繳款情況")
+    
+    display_tenant = tenant_stats[['room_number', 'tenant_name', 'amount', 'paid_amount', '待繳', '完成度', 'status']].copy()
+    display_tenant.columns = ['房號', '房客', '應繳', '實繳', '待繳', '完成度', '狀態']
+    display_tenant['應繳'] = display_tenant['應繳'].apply(lambda x: f"${x:,.0f}")
+    display_tenant['實繳'] = display_tenant['實繳'].apply(lambda x: f"${x:,.0f}")
+    display_tenant['待繳'] = display_tenant['待繳'].apply(lambda x: f"${x:,.0f}")
+    display_tenant['狀態'] = display_tenant['狀態'].apply(lambda x: {'paid': '✅ 已繳', 'unpaid': '⏰ 待繳', 'overdue': '⚠️ 逾期'}.get(x, x))
+    
+    st.dataframe(display_tenant[['房號', '房客', '應繳', '實繳', '待繳', '完成度', '狀態']], use_container_width=True, hide_index=True)
+    
+    # 視覺化
+    st.divider()
+    st.subheader("📈 待繳金額排行")
+    
+    chart_data = tenant_stats[['room_number', '待繳']].copy()
+    chart_data.columns = ['房號', '待繳金額']
+    chart_data = chart_data.sort_values('待繳金額', ascending=True)
+    
+    if not chart_data.empty and chart_data['待繳金額'].sum() > 0:
+        st.bar_chart(chart_data.set_index('房號'))
     else:
-        # 年度趨勢
-        trends = db.get_payment_trends(report_year)
-        
-        if not trends:
-            empty_state(f"{report_year} 年沒有資料", "📭")
-            return
-        
-        # 年度統計
-        stats = db.get_payment_statistics(report_year)
-        
-        col_a, col_b, col_c = st.columns(3)
-        
-        with col_a:
-            metric_card("年度應收", f"${stats['total_amount']:,.0f}", icon="💰")
-        
-        with col_b:
-            metric_card("年度實收", f"${stats['paid_amount']:,.0f}", icon="✅", color="success")
-        
-        with col_c:
-            metric_card("年度收款率", f"{stats['payment_rate']:.1f}%", icon="📊")
-        
-        st.divider()
-        
-        # 趨勢圖
-        df_trends = pd.DataFrame(trends)
-        
-        st.write("**月度收款趨勢**")
-        st.line_chart(df_trends.set_index('month')[['total_amount', 'paid_amount']])
-        
-        st.divider()
-        
-        st.write("**月度收款率**")
-        st.bar_chart(df_trends.set_index('month')['payment_rate'])
-        
-        st.divider()
-        
-        # 表格
-        df_trends['應收'] = df_trends['total_amount'].apply(lambda x: f"${x:,.0f}")
-        df_trends['已收'] = df_trends['paid_amount'].apply(lambda x: f"${x:,.0f}")
-        df_trends['收款率'] = df_trends['payment_rate'].apply(lambda x: f"{x:.1f}%")
-        
-        data_table(df_trends[['month', '應收', '已收', '收款率']], key="yearly_trends")
+        st.success("✅ 所有房客都已繳清！")
 
 
-# ============== 主函數 ==============
-
-def render(db):
-    """主渲染函數"""
-    st.title("💰 租金管理")
-    
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "📝 單筆預填",
-        "📋 批量預填",
-        "✅ 繳費確認",
-        "📊 財務報表"
-    ])
-    
-    with tab1:
-        render_single_tab(db)
-    
-    with tab2:
-        render_batch_tab(db)
-    
-    with tab3:
-        render_payment_tab(db)
-    
-    with tab4:
-        render_report_tab(db)
+# Main 執行區
+if __name__ == "__main__":
+    render_rent_page()
