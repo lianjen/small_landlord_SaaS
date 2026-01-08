@@ -1,10 +1,8 @@
 """
-支出管理 - 完整重構版
-特性:
-- 新增/編輯/刪除
-- 分類統計圖表
-- 月度/年度趨勢
-- 預算管理
+支出記錄頁面
+- 新增支出
+- 支出列表
+- 統計分析
 """
 
 import streamlit as st
@@ -12,80 +10,65 @@ import pandas as pd
 from datetime import date, datetime
 import logging
 
-# 安全 import
+# 導入組件
 try:
     from components.cards import section_header, metric_card, empty_state, data_table, info_card
 except ImportError:
-    def section_header(title, icon="", divider=True):
-        st.markdown(f"### {icon} {title}")
-        if divider: st.divider()
-    def metric_card(label, value, delta="", icon="", color="normal"):
+    def section_header(title, icon, divider=True):
+        st.markdown(f"{icon} {title}")
+        if divider:
+            st.divider()
+    
+    def metric_card(label, value, delta, icon, color="normal"):
         st.metric(label, value, delta)
-    def empty_state(msg, icon="", desc=""):
+    
+    def empty_state(msg, icon, desc):
         st.info(f"{icon} {msg}")
+    
     def data_table(df, key="table"):
         st.dataframe(df, use_container_width=True, key=key)
-    def info_card(title, content, icon="", type="info"):
-        st.info(f"{icon} {title}: {content}")
+    
+    def info_card(title, content, icon, type="info"):
+        st.info(f"{icon} {title}\n\n{content}")
 
 try:
     from config.constants import EXPENSE
 except ImportError:
     class EXPENSE:
-        CATEGORIES = ["維修", "雜項", "貸款", "水電費", "網路費", "保險", "稅金", "其他"]
+        CATEGORIES = ["維修", "水電", "清潔", "管理費", "保險", "稅金", "其他"]
 
 logger = logging.getLogger(__name__)
 
-# ============== Tab 1: 新增支出 ==============
 
 def render_add_tab(db):
     """新增支出"""
-    section_header("新增支出", "➕")
+    section_header("➕ 新增支出", "", divider=True)
     
     with st.form("add_expense_form"):
         col1, col2 = st.columns(2)
         
         with col1:
-            expense_date = st.date_input(
-                "日期 *",
-                value=date.today(),
-                key="add_date"
-            )
-            
-            category = st.selectbox(
-                "分類 *",
-                EXPENSE.CATEGORIES,
-                key="add_category"
-            )
+            expense_date = st.date_input("日期", value=date.today(), key="add_date")
+            category = st.selectbox("類別", EXPENSE.CATEGORIES, key="add_category")
         
         with col2:
-            amount = st.number_input(
-                "金額 *",
-                min_value=0,
-                value=0,
-                step=100,
-                key="add_amount"
-            )
+            amount = st.number_input("金額", min_value=0, value=0, step=100, key="add_amount")
             
-            # 預算提醒
+            # 計算建議金額
             if amount > 0 and category:
-                st.caption(f"💡 {category} 本月已支出查詢中...")
+                st.caption(f"💡 {category} 支出：${amount:,}")
         
-        description = st.text_area(
-            "說明",
-            placeholder="例如: 維修 2A 房間冷氣",
-            key="add_desc"
-        )
+        description = st.text_area("說明", placeholder="例如：2A 房間水龍頭維修", key="add_desc")
         
-        submitted = st.form_submit_button("💾 新增", type="primary")
+        submitted = st.form_submit_button("💾 新增支出", type="primary")
         
         if submitted:
             if amount <= 0:
-                st.error("❌ 請輸入金額")
+                st.error("⚠️ 請輸入金額")
             elif not description.strip():
-                st.warning("⚠️ 建議填寫說明")
+                st.warning("⚠️ 請輸入說明")
                 
-                if st.button("仍要新增"):
+                if st.button("🚀 忽略警告並新增"):
                     if db.add_expense(expense_date, category, amount, description):
                         st.success("✅ 新增成功")
                         st.rerun()
@@ -98,13 +81,11 @@ def render_add_tab(db):
                     st.error("❌ 新增失敗")
 
 
-# ============== Tab 2: 支出列表 ==============
-
 def render_list_tab(db):
     """支出列表"""
-    section_header("支出列表", "📋")
+    section_header("📋 支出列表", "", divider=True)
     
-    # 篩選
+    # 篩選條件
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
@@ -112,7 +93,7 @@ def render_list_tab(db):
             "年份",
             [None] + list(range(2020, 2031)),
             format_func=lambda x: "全部" if x is None else str(x),
-            index=date.today().year - 2020 + 1,
+            index=(date.today().year - 2020 + 1) if date.today().year >= 2020 else 0,
             key="list_year"
         )
     
@@ -125,33 +106,22 @@ def render_list_tab(db):
         )
     
     with col3:
-        filter_category = st.multiselect(
-            "分類",
-            EXPENSE.CATEGORIES,
-            key="list_category"
-        )
+        filter_category = st.multiselect("類別", EXPENSE.CATEGORIES, key="list_category")
     
     with col4:
-        limit = st.number_input(
-            "顯示筆數",
-            min_value=10,
-            max_value=500,
-            value=100,
-            step=10,
-            key="list_limit"
-        )
+        limit = st.number_input("顯示筆數", min_value=10, max_value=500, value=100, step=10, key="list_limit")
     
     st.divider()
     
-    # 查詢
+    # 查詢資料
     try:
         df = db.get_expenses(limit=limit)
     except Exception as e:
-        st.error(f"❌ 查詢失敗: {e}")
+        st.error(f"查詢失敗: {e}")
         return
     
     if df.empty:
-        empty_state("尚無支出記錄", "📭")
+        empty_state("暫無支出記錄", "📭", "")
         return
     
     # 應用篩選
@@ -167,44 +137,54 @@ def render_list_tab(db):
         df = df[df['category'].isin(filter_category)]
     
     if df.empty:
-        empty_state("沒有符合條件的記錄", "📭")
+        empty_state("查無符合條件的記錄", "📭", "")
         return
     
     # 統計
     total_amount = df['amount'].sum()
     avg_amount = df['amount'].mean()
     
-    col_s1, col_s2, col_s3 = st.columns(3)
+    cols1, cols2, cols3 = st.columns(3)
     
-    with col_s1:
-        metric_card("總支出", f"${total_amount:,.0f}", icon="💰", color="normal")
+    with cols1:
+        metric_card("總金額", f"${total_amount:,.0f}", None, "💰", color="normal")
     
-    with col_s2:
-        metric_card("筆數", str(len(df)), icon="📋", color="normal")
+    with cols2:
+        metric_card("總筆數", str(len(df)), None, "📊", color="normal")
     
-    with col_s3:
-        metric_card("平均", f"${avg_amount:,.0f}", icon="📊", color="normal")
+    with cols3:
+        metric_card("平均金額", f"${avg_amount:,.0f}", None, "📈", color="normal")
     
     st.divider()
     
     # 顯示列表
-    st.write(f"共 {len(df)} 筆記錄")
+    st.write(f"**共 {len(df)} 筆支出記錄**")
     
-    # 格式化
+    # 準備顯示資料
     display_df = df.copy()
-    display_df['日期'] = pd.to_datetime(display_df['expense_date']).dt.strftime('%Y-%m-%d')
-    display_df['金額'] = display_df['amount'].apply(lambda x: f"${x:,.0f}")
+    display_df['expense_date'] = pd.to_datetime(display_df['expense_date']).dt.strftime("%Y-%m-%d")
+    display_df['amount'] = display_df['amount'].apply(lambda x: f"${x:,.0f}")
     
-    cols_to_show = ['id', '日期', 'category', '金額', 'description']
-    rename = {'category': '分類', 'description': '說明'}
+    # ✅ 修正：只顯示存在的欄位
+    available_cols = display_df.columns.tolist()
+    preferred_cols = ['id', 'expense_date', 'category', 'amount', 'description']
+    cols_to_show = [col for col in preferred_cols if col in available_cols]
+    
+    rename = {
+        'expense_date': '日期',
+        'category': '類別',
+        'amount': '金額',
+        'description': '說明'
+    }
     
     display_df = display_df.rename(columns=rename)
+    final_cols = [rename.get(col, col) for col in cols_to_show]
     
-    # 可選擇的表格
+    # 選擇支出項目進行編輯/刪除
     selected_expense = st.selectbox(
-        "選擇要編輯/刪除的項目",
-        [None] + display_df['id'].tolist(),
-        format_func=lambda x: "請選擇..." if x is None else f"ID {x} - {display_df[display_df['id']==x]['分類'].values[0]} ${display_df[display_df['id']==x]['amount'].values[0]:,.0f}",
+        "選擇支出項目",
+        [None] + display_df['id'].tolist() if 'id' in display_df.columns else [None],
+        format_func=lambda x: "-- 請選擇 --" if x is None else f"ID {x} - {display_df[display_df['id']==x][rename.get('category', 'category')].values[0]} (${display_df[display_df['id']==x][rename.get('amount', 'amount')].values[0]})",
         key="selected_expense"
     )
     
@@ -214,118 +194,89 @@ def render_list_tab(db):
         col_edit, col_delete = st.columns([3, 1])
         
         with col_edit:
-            with st.expander("✏️ 編輯此項目", expanded=True):
+            with st.expander("✏️ 編輯支出", expanded=True):
                 with st.form("edit_expense_form"):
-                    edit_date = st.date_input(
-                        "日期",
-                        value=pd.to_datetime(expense_row['expense_date']).date(),
-                        key="edit_date"
-                    )
+                    edit_date = st.date_input("日期", value=pd.to_datetime(expense_row['expense_date']).date(), key="edit_date")
                     
-                    col_e1, col_e2 = st.columns(2)
+                    cole1, cole2 = st.columns(2)
                     
-                    with col_e1:
+                    with cole1:
                         edit_category = st.selectbox(
-                            "分類",
+                            "類別",
                             EXPENSE.CATEGORIES,
                             index=EXPENSE.CATEGORIES.index(expense_row['category']) if expense_row['category'] in EXPENSE.CATEGORIES else 0,
                             key="edit_category"
                         )
                     
-                    with col_e2:
-                        edit_amount = st.number_input(
-                            "金額",
-                            min_value=0,
-                            value=int(expense_row['amount']),
-                            step=100,
-                            key="edit_amount"
-                        )
+                    with cole2:
+                        edit_amount = st.number_input("金額", min_value=0, value=int(expense_row['amount']), step=100, key="edit_amount")
                     
-                    edit_desc = st.text_area(
-                        "說明",
-                        value=expense_row.get('description', ''),
-                        key="edit_desc"
-                    )
+                    edit_desc = st.text_area("說明", value=expense_row.get('description', ''), key="edit_desc")
                     
                     if st.form_submit_button("💾 儲存變更", type="primary"):
-                        # 更新 (需要在 db.py 新增此方法)
                         try:
-                            with db._get_connection() as conn:
+                            with db.get_connection() as conn:
                                 cur = conn.cursor()
                                 cur.execute("""
-                                    UPDATE expenses
-                                    SET expense_date = %s,
-                                        category = %s,
-                                        amount = %s,
-                                        description = %s
+                                    UPDATE expenses 
+                                    SET expense_date = %s, category = %s, amount = %s, description = %s
                                     WHERE id = %s
                                 """, (edit_date, edit_category, edit_amount, edit_desc, selected_expense))
-                                
-                                st.success("✅ 更新成功")
-                                st.rerun()
+                                conn.commit()
+                            st.success("✅ 更新成功")
+                            st.rerun()
                         except Exception as e:
-                            st.error(f"❌ 更新失敗: {e}")
+                            st.error(f"更新失敗: {e}")
         
         with col_delete:
             st.write("")
             st.write("")
+            
             if st.button("🗑️ 刪除", type="secondary"):
                 if st.session_state.get('confirm_delete_expense'):
                     try:
-                        with db._get_connection() as conn:
+                        with db.get_connection() as conn:
                             cur = conn.cursor()
                             cur.execute("DELETE FROM expenses WHERE id = %s", (selected_expense,))
-                            
-                            st.success("✅ 已刪除")
-                            del st.session_state.confirm_delete_expense
-                            st.rerun()
+                            conn.commit()
+                        st.success("✅ 刪除成功")
+                        del st.session_state.confirm_delete_expense
+                        st.rerun()
                     except Exception as e:
-                        st.error(f"❌ 刪除失敗: {e}")
+                        st.error(f"刪除失敗: {e}")
                 else:
                     st.session_state.confirm_delete_expense = True
-                    st.warning("⚠️ 再按一次確認")
-    
-    st.divider()
+                    st.warning("⚠️ 再次點擊確認刪除")
+        
+        st.divider()
     
     # 顯示表格
-    data_table(display_df[cols_to_show], key="expense_list")
+    st.dataframe(display_df[final_cols], use_container_width=True, hide_index=True, key="expense_list")
 
-
-# ============== Tab 3: 統計分析 ==============
 
 def render_stats_tab(db):
     """統計分析"""
-    section_header("統計分析", "📊")
+    section_header("📊 統計分析", "", divider=True)
     
-    # 選擇期間
+    # 選擇統計類型
     col1, col2 = st.columns(2)
     
     with col1:
-        stats_year = st.selectbox(
-            "年份",
-            range(2020, 2031),
-            index=date.today().year - 2020,
-            key="stats_year"
-        )
+        stats_year = st.selectbox("年份", range(2020, 2031), index=(date.today().year - 2020), key="stats_year")
     
     with col2:
-        stats_type = st.radio(
-            "類型",
-            ["月度分析", "年度趨勢", "分類統計"],
-            horizontal=True,
-            key="stats_type"
-        )
+        stats_type = st.radio("統計類型", ["月度分析", "年度總覽", "類別分析"], horizontal=True, key="stats_type")
     
     st.divider()
     
-    # 取得資料
+    # 查詢資料
     df = db.get_expenses(limit=1000)
     
     if df.empty:
-        empty_state("尚無支出記錄", "📭")
+        empty_state("暫無資料", "📭", "")
         return
     
-    # 轉換日期
+    # 處理日期
     df['date'] = pd.to_datetime(df['expense_date'])
     df['year'] = df['date'].dt.year
     df['month'] = df['date'].dt.month
@@ -334,77 +285,76 @@ def render_stats_tab(db):
     df_year = df[df['year'] == stats_year]
     
     if df_year.empty:
-        empty_state(f"{stats_year} 年沒有支出記錄", "📭")
+        empty_state(f"{stats_year} 年無支出記錄", "📭", "")
         return
     
     if stats_type == "月度分析":
         # 月度分析
-        month = st.selectbox("月份", range(1, 13), index=date.today().month - 1, key="stats_month")
+        month = st.selectbox("月份", range(1, 13), index=(date.today().month - 1), key="stats_month")
         
         df_month = df_year[df_year['month'] == month]
         
         if df_month.empty:
-            empty_state(f"{stats_year}/{month} 沒有支出", "📭")
+            empty_state(f"{stats_year} 年 {month} 月無支出記錄", "📭", "")
             return
         
-        # 統計
+        # 月度統計
         total = df_month['amount'].sum()
         count = len(df_month)
         avg = df_month['amount'].mean()
         
-        col_a, col_b, col_c = st.columns(3)
+        cola, colb, colc = st.columns(3)
         
-        with col_a:
-            metric_card("總支出", f"${total:,.0f}", icon="💰")
+        with cola:
+            metric_card("總支出", f"${total:,.0f}", None, "💰", "normal")
         
-        with col_b:
-            metric_card("筆數", str(count), icon="📋")
+        with colb:
+            metric_card("筆數", str(count), None, "📊", "normal")
         
-        with col_c:
-            metric_card("平均", f"${avg:,.0f}", icon="📊")
+        with colc:
+            metric_card("平均", f"${avg:,.0f}", None, "📈", "normal")
         
         st.divider()
         
-        # 分類圖表
-        st.write("**分類佔比**")
-        
+        # 類別分布
+        st.write("**類別分布**")
+        category_sum = df_month.groupby('category')['amount'].sum
+        # 類別分布
+        st.write("**類別分布**")
         category_sum = df_month.groupby('category')['amount'].sum().reset_index()
-        category_sum.columns = ['分類', '金額']
+        category_sum.columns = ['類別', '金額']
         category_sum = category_sum.sort_values('金額', ascending=False)
+        st.bar_chart(category_sum.set_index('類別'))
         
-        st.bar_chart(category_sum.set_index('分類'))
-        
-        # 明細表
         st.divider()
         st.write("**明細**")
-        data_table(category_sum, key="month_category")
+        st.dataframe(category_sum, use_container_width=True, hide_index=True, key="month_category")
     
-    elif stats_type == "年度趨勢":
-        # 年度趨勢
+    elif stats_type == "年度總覽":
+        # 年度總覽
         total_year = df_year['amount'].sum()
         count_year = len(df_year)
         avg_month = total_year / 12
         
-        col_a, col_b, col_c = st.columns(3)
+        cola, colb, colc = st.columns(3)
         
-        with col_a:
-            metric_card("年度總支出", f"${total_year:,.0f}", icon="💰")
+        with cola:
+            metric_card("年度總支出", f"${total_year:,.0f}", None, "💰", "normal")
         
-        with col_b:
-            metric_card("總筆數", str(count_year), icon="📋")
+        with colb:
+            metric_card("總筆數", str(count_year), None, "📊", "normal")
         
-        with col_c:
-            metric_card("月均支出", f"${avg_month:,.0f}", icon="📊")
+        with colc:
+            metric_card("月平均", f"${avg_month:,.0f}", None, "📈", "normal")
         
         st.divider()
         
         # 月度趨勢
         st.write("**月度趨勢**")
-        
         monthly = df_year.groupby('month')['amount'].sum().reset_index()
-        monthly.columns = ['月份', '支出']
+        monthly.columns = ['月份', '金額']
         
-        # 補全 12 個月
+        # 補齊所有月份
         all_months = pd.DataFrame({'月份': range(1, 13)})
         monthly = all_months.merge(monthly, on='月份', how='left').fillna(0)
         
@@ -412,46 +362,42 @@ def render_stats_tab(db):
         
         st.divider()
         
-        # 表格
-        monthly['支出'] = monthly['支出'].apply(lambda x: f"${x:,.0f}")
-        data_table(monthly, key="monthly_trend")
+        # 12個月明細
+        monthly['金額'] = monthly['金額'].apply(lambda x: f"${x:,.0f}")
+        st.dataframe(monthly, use_container_width=True, hide_index=True, key="monthly_trend")
     
     else:
-        # 分類統計
+        # 類別分析
         total_year = df_year['amount'].sum()
         
-        st.write(f"**{stats_year} 年度總支出: ${total_year:,.0f}**")
-        
+        st.write(f"**{stats_year} 年總支出：${total_year:,.0f}**")
         st.divider()
         
-        # 分類統計
+        # 類別統計
         category_stats = df_year.groupby('category').agg({
             'amount': ['sum', 'count', 'mean']
         }).reset_index()
+        category_stats.columns = ['類別', '總金額', '筆數', '平均']
+        category_stats['佔比'] = (category_stats['總金額'] / total_year * 100).round(1)
+        category_stats = category_stats.sort_values('總金額', ascending=False)
         
-        category_stats.columns = ['分類', '總額', '筆數', '平均']
-        category_stats['佔比'] = (category_stats['總額'] / total_year * 100).round(1)
-        category_stats = category_stats.sort_values('總額', ascending=False)
-        
-        # 圓餅圖
-        st.write("**分類佔比**")
-        st.bar_chart(category_stats.set_index('分類')['佔比'])
+        # 類別圖表
+        st.write("**類別分布圖**")
+        st.bar_chart(category_stats.set_index('類別')['總金額'])
         
         st.divider()
         
-        # 表格
-        category_stats['總額'] = category_stats['總額'].apply(lambda x: f"${x:,.0f}")
+        # 類別明細表
+        category_stats['總金額'] = category_stats['總金額'].apply(lambda x: f"${x:,.0f}")
         category_stats['平均'] = category_stats['平均'].apply(lambda x: f"${x:,.0f}")
         category_stats['佔比'] = category_stats['佔比'].apply(lambda x: f"{x}%")
         
-        data_table(category_stats, key="category_stats")
+        st.dataframe(category_stats, use_container_width=True, hide_index=True, key="category_stats")
 
-
-# ============== 主函數 ==============
 
 def render(db):
-    """主渲染函數"""
-    st.title("💸 支出管理")
+    """支出記錄主頁面"""
+    st.title("💸 支出記錄")
     
     tab1, tab2, tab3 = st.tabs(["➕ 新增支出", "📋 支出列表", "📊 統計分析"])
     
