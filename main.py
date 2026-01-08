@@ -29,6 +29,10 @@ def get_env(var: str, default: Optional[str] = None) -> Optional[str]:
 # 驗證必要環境變數
 REQUIRED_VARS = ["SUPABASE_URL", "SUPABASE_KEY"]
 
+# 🔍 debug：看看現在到底讀到什麼
+st.write("DEBUG SUPABASE_URL:", get_env("SUPABASE_URL"))
+st.write("DEBUG SUPABASE_KEY:", "存在" if get_env("SUPABASE_KEY") else "不存在")
+
 missing_vars = [var for var in REQUIRED_VARS if not get_env(var)]
 
 if missing_vars:
