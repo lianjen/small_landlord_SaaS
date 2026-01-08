@@ -1,18 +1,25 @@
-# 🔒 敏感資訊
-.streamlit/secrets.toml
+# 環境變數（包含敏感資訊，不可提交）
 .env
-.env.local
 
 # Python
 __pycache__/
-*.pyc
-*.pyo
-*.egg-info/
+*.py[cod]
+*$py.class
+*.so
+
+# Logs
+logs/
+*.log
 
 # IDE
 .vscode/
 .idea/
+*.swp
+*.swo
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Streamlit
+.streamlit/secrets.toml
