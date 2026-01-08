@@ -1,66 +1,83 @@
 # services/logger.py
+"""
+統一日誌系統
+用於記錄應用程式運行狀態、錯誤、業務操作
+"""
 import logging
 import os
 from logging.handlers import RotatingFileHandler
-from datetime import datetime
+from pathlib import Path
 
 class AppLogger:
-    """統一日誌管理系統"""
+    """應用程式日誌管理器"""
     
-    _loggers = {}
+    _instance = None
+    _logger = None
     
-    @classmethod
-    def get_logger(cls, name: str = "rental_app") -> logging.Logger:
-        """取得或建立 logger 實例"""
-        if name in cls._loggers:
-            return cls._loggers[name]
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialize_logger()
+        return cls._instance
+    
+    def _initialize_logger(self):
+        """初始化 logger 配置"""
+        # 建立 logs 目錄
+        log_dir = Path("logs")
+        log_dir.mkdir(exist_ok=True)
         
-        logger = logging.getLogger(name)
-        logger.setLevel(getattr(logging, os.getenv('LOG_LEVEL', 'INFO')))
+        # 取得日誌等級（從環境變數或預設 INFO）
+        log_level_str = os.getenv('LOG_LEVEL', 'INFO')
+        log_level = getattr(logging, log_level_str.upper(), logging.INFO)
+        
+        # 建立 logger
+        self._logger = logging.getLogger('rental_app')
+        self._logger.setLevel(log_level)
         
         # 避免重複添加 handler
-        if logger.handlers:
-            return logger
+        if self._logger.handlers:
+            return
         
-        # 格式化
+        # 格式化器
         formatter = logging.Formatter(
             '[%(asctime)s] %(levelname)-8s [%(name)s:%(funcName)s:%(lineno)d] %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'
         )
         
-        # Console Handler
+        # Console Handler（輸出到終端）
         console_handler = logging.StreamHandler()
+        console_handler.setLevel(log_level)
         console_handler.setFormatter(formatter)
-        logger.addHandler(console_handler)
+        self._logger.addHandler(console_handler)
         
-        # File Handler（自動輪轉，最多保留 5 個檔案，每個 10MB）
-        os.makedirs('logs', exist_ok=True)
-        file_handler = RotatingFileHandler(
-            'logs/app.log',
-            maxBytes=10*1024*1024,  # 10MB
-            backupCount=5
-        )
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-        
-        cls._loggers[name] = logger
-        return logger
+        # File Handler（輸出到檔案，自動輪轉）
+        try:
+            file_handler = RotatingFileHandler(
+                log_dir / 'app.log',
+                maxBytes=10 * 1024 * 1024,  # 10MB
+                backupCount=5,
+                encoding='utf-8'
+            )
+            file_handler.setLevel(log_level)
+            file_handler.setFormatter(formatter)
+            self._logger.addHandler(file_handler)
+        except Exception as e:
+            print(f"⚠️ 無法建立檔案日誌 handler: {e}")
+    
+    @property
+    def logger(self):
+        """取得 logger 實例"""
+        return self._logger
 
-# 建立全域 logger
-logger = AppLogger.get_logger()
 
-# 使用範例函數
-def log_db_operation(operation: str, table: str, success: bool, 
-                     row_count: int = None, error: str = None):
-    """記錄資料庫操作"""
-    if success:
-        msg = f"DB操作成功: {operation} on {table}"
-        if row_count is not None:
-            msg += f" ({row_count} rows)"
-        logger.info(msg)
-    else:
-        logger.error(f"DB操作失敗: {operation} on {table} - {error}")
+# 建立全域 logger 實例（方便其他模組 import）
+logger = AppLogger().logger
 
-def log_user_action(action: str, details: dict):
-    """記錄使用者操作"""
-    logger.info(f"用戶操作: {action}", extra=details)
+
+# 使用範例
+if __name__ == "__main__":
+    logger.debug("這是 DEBUG 訊息")
+    logger.info("這是 INFO 訊息")
+    logger.warning("這是 WARNING 訊息")
+    logger.error("這是 ERROR 訊息")
+    logger.critical("這是 CRITICAL 訊息")
