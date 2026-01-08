@@ -5,18 +5,24 @@ from dateutil.relativedelta import relativedelta
 from services.payment_service import PaymentService
 from services.database import SupabaseDB
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
 def render_rent_page():
     """租金管理主頁面"""
-    st.set_page_config(page_title="💰 租金管理", layout="wide")
     st.title("💰 租金管理系統")
     
-    # 初始化 Service 和 Database
-    service = PaymentService()
-    db = SupabaseDB()
-    
+    # 初始化 Service 和 Database (加入錯誤處理)
+    try:
+        service = PaymentService()
+        db = SupabaseDB()
+    except Exception as e:
+        st.error("❌ 資料庫連線失敗，請檢查網路連線或 .env 設定檔。")
+        st.error(f"詳細錯誤: {str(e)}")
+        logger.error(f"Database connection error: {e}")
+        return
+
     # 建立 Tab
     tab1, tab2, tab3, tab4 = st.tabs(["📅 建立排程", "📊 本月摘要", "💳 收款管理", "📈 報表分析"])
     
@@ -102,12 +108,16 @@ def render_schedule_tab(service: PaymentService, db: SupabaseDB):
         if not tenants_df.empty:
             preview_data = []
             for idx, tenant in tenants_df.iterrows():
+                # 簡單防呆：確保必要欄位存在
+                if 'base_rent' not in tenant:
+                    continue
+
                 rent_detail = service.calculate_rent_detail(tenant.to_dict())
                 preview_data.append({
-                    "房號": tenant['room_number'],
-                    "房客": tenant['tenant_name'],
-                    "基本月租": f"${tenant['base_rent']:,.0f}",
-                    "計算月租": f"${rent_detail['monthly_rent']:,.0f}",
+                    "房號": tenant.get('room_number', '未知'),
+                    "房客": tenant.get('tenant_name', '未知'),
+                    "基本月租": f"${tenant.get('base_rent', 0):,.0f}",
+                    "計算月租": f"${rent_detail.get('monthly_rent', 0):,.0f}",
                     "繳款方式": tenant.get('payment_method', '月繳'),
                     "狀態": "✅ 有效" if tenant.get('is_active', True) else "❌ 已停用"
                 })
@@ -238,10 +248,15 @@ def render_payment_tab(service: PaymentService, db: SupabaseDB):
         )
     
     with col4:
-        tenants_list = db.get_tenants()
+        try:
+            tenants_list = db.get_tenants()
+            room_options = [None] + (tenants_list['room_number'].tolist() if not tenants_list.empty else [])
+        except:
+            room_options = [None]
+            
         filter_room = st.selectbox(
             "房號",
-            [None] + (tenants_list['room_number'].tolist() if not tenants_list.empty else []),
+            room_options,
             format_func=lambda x: "全部" if x is None else str(x),
             key="pay_room"
         )
@@ -296,56 +311,79 @@ def render_payment_tab(service: PaymentService, db: SupabaseDB):
         unpaid_df = db.get_payment_schedule(status='unpaid')
         
         if not unpaid_df.empty:
+            # 建立選項標籤
+            options_map = {
+                row['id']: f"{row['room_number']} - {row['tenant_name']} ({row['payment_year']}/{row['payment_month']})"
+                for _, row in unpaid_df.iterrows()
+            }
+            
             selected_ids = st.multiselect(
                 "選擇要標記的記錄",
-                unpaid_df['id'].tolist(),
-                format_func=lambda x: f"{unpaid_df[unpaid_df['id'] == x]['room_number'].values[0]} - {unpaid_df[unpaid_df['id'] == x]['tenant_name'].values[0]} ({unpaid_df[unpaid_df['id'] == x]['payment_year'].values[0]}/{unpaid_df[unpaid_df['id'] == x]['payment_month'].values[0]})",
+                options=list(options_map.keys()),
+                format_func=lambda x: options_map.get(x, str(x)),
                 key="batch_mark_ids"
             )
             
             col_mark_btn, col_paid_amount, col_paid_date = st.columns(3)
             
             with col_mark_btn:
+                # 按鈕邏輯
                 if st.button("✅ 確認標記", type="primary"):
                     if len(selected_ids) > 0:
-                        paid_amount = col_paid_amount.number_input("繳款金額", min_value=0, step=100, key="paid_amt")
-                        paid_date = col_paid_date.date_input("繳款日期", value=date.today(), key="paid_dt")
-                        
-                        if paid_amount > 0:
-                            try:
-                                with st.spinner("正在標記..."):
-                                    success_count = 0
-                                    fail_count = 0
-                                    
-                                    for payment_id in selected_ids:
-                                        try:
-                                            result = service.mark_as_paid(
-                                                payment_id,
-                                                paid_amount,
-                                                datetime.combine(paid_date, datetime.min.time())
-                                            )
-                                            if result:
-                                                success_count += 1
-                                            else:
-                                                fail_count += 1
-                                        except Exception as e:
-                                            fail_count += 1
-                                            logger.error(f"Mark payment {payment_id} failed: {e}")
-                                    
-                                    if success:
-_count > 0:
-                                        st.success(f"✅ 成功標記 {success_count} 筆為已繳！")
-                                    if fail_count > 0:
-                                        st.warning(f"⚠️ {fail_count} 筆標記失敗")
-                                    st.rerun()
-                            
-                            except Exception as e:
-                                st.error(f"❌ 標記失敗：{str(e)}")
-                                logger.error(f"Mark as paid error: {e}")
-                        else:
-                            st.warning("請輸入繳款金額")
+                        # 這裡要小心，如果是批量不同金額，應該要自動帶入該筆應繳金額
+                        # 但介面設計是統一輸入一個金額，這裡假設是「全額繳清」或手動輸入
+                        # 使用 session_state 來取得右側輸入框的值可能會比較慢更新，直接取值
+                        pass
                     else:
                         st.warning("請先選擇要標記的記錄")
+
+            # 輸入框移到外面確保值能被讀取，或者在button內讀取session_state
+            # 為了簡單起見，直接渲染輸入框
+            with col_paid_amount:
+                paid_amount = st.number_input("繳款金額 (0=自動帶入應繳額)", min_value=0, step=100, key="paid_amt")
+                st.caption("若輸入 0，系統將自動填入該筆記錄的應繳金額")
+                
+            with col_paid_date:
+                paid_date = st.date_input("繳款日期", value=date.today(), key="paid_dt")
+            
+            # 實際執行邏輯 (檢查完輸入後)
+            if st.session_state.get("batch_mark_ids") and st.button("🚀 執行標記", key="confirm_pay"):
+                 with st.spinner("正在標記..."):
+                    success_count = 0
+                    fail_count = 0
+                    
+                    for payment_id in selected_ids:
+                        try:
+                            # 獲取該筆記錄的應繳金額 (如果使用者輸入0)
+                            final_amount = paid_amount
+                            if final_amount == 0:
+                                current_record = unpaid_df[unpaid_df['id'] == payment_id]
+                                if not current_record.empty:
+                                    final_amount = current_record.iloc[0]['amount']
+                            
+                            result = service.mark_as_paid(
+                                payment_id,
+                                final_amount,
+                                datetime.combine(paid_date, datetime.min.time())
+                            )
+                            if result:
+                                success_count += 1
+                            else:
+                                fail_count += 1
+                        except Exception as e:
+                            fail_count += 1
+                            logger.error(f"Mark payment {payment_id} failed: {e}")
+                    
+                    # --- 這裡是你原本發生縮排錯誤的地方 (已修復) ---
+                    if success_count > 0:
+                        st.success(f"✅ 成功標記 {success_count} 筆為已繳！")
+                    
+                    if fail_count > 0:
+                        st.warning(f"⚠️ {fail_count} 筆標記失敗")
+                    
+                    time.sleep(1)
+                    st.rerun()
+
         else:
             st.success("✅ 所有租金都已收齊！")
     
@@ -535,7 +573,9 @@ def render_tenant_comparison(service: PaymentService, db: SupabaseDB, year: int,
     }).reset_index()
     
     tenant_stats['待繳'] = tenant_stats['amount'] - tenant_stats['paid_amount']
-    tenant_stats['完成度'] = (tenant_stats['paid_amount'] / tenant_stats['amount']).apply(lambda x: f"{x:.1%}")
+    # 處理除以零的情況
+    tenant_stats['完成度'] = tenant_stats.apply(lambda x: (x['paid_amount'] / x['amount']) if x['amount'] > 0 else 0, axis=1)
+    tenant_stats['完成度_fmt'] = tenant_stats['完成度'].apply(lambda x: f"{x:.1%}")
     
     # 按待繳金額排序
     tenant_stats = tenant_stats.sort_values('待繳', ascending=False)
@@ -559,7 +599,7 @@ def render_tenant_comparison(service: PaymentService, db: SupabaseDB, year: int,
     # 顯示對比表
     st.subheader("📊 房客繳款情況")
     
-    display_tenant = tenant_stats[['room_number', 'tenant_name', 'amount', 'paid_amount', '待繳', '完成度', 'status']].copy()
+    display_tenant = tenant_stats[['room_number', 'tenant_name', 'amount', 'paid_amount', '待繳', '完成度_fmt', 'status']].copy()
     display_tenant.columns = ['房號', '房客', '應繳', '實繳', '待繳', '完成度', '狀態']
     display_tenant['應繳'] = display_tenant['應繳'].apply(lambda x: f"${x:,.0f}")
     display_tenant['實繳'] = display_tenant['實繳'].apply(lambda x: f"${x:,.0f}")
@@ -584,4 +624,5 @@ def render_tenant_comparison(service: PaymentService, db: SupabaseDB, year: int,
 
 # Main 執行區
 if __name__ == "__main__":
+    st.set_page_config(page_title="💰 租金管理", layout="wide")
     render_rent_page()
