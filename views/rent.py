@@ -32,7 +32,7 @@ def render_rent_page(db):
     """
     st.title("💰 租金管理")
     
-    service = PaymentService(db)
+    service = PaymentService()
     
     # 頁籤
     tab1, tab2, tab3, tab4 = st.tabs([
@@ -325,3 +325,4 @@ def render_annual_report(service: PaymentService):
 
 if __name__ == "__main__":
     render_rent_page(None)
+
