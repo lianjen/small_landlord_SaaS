@@ -3,17 +3,36 @@
 租金管理頁面
 職責：UI 展示與使用者互動，業務邏輯委派給 PaymentService
 """
+
 import streamlit as st
 from datetime import datetime
 from services.payment_service import PaymentService
 from services.logger import logger
 import pandas as pd
 
-def render_rent_page():
-    """渲染租金管理主頁面"""
+
+# ============================================
+# 主入口（供 main.py 呼叫）
+# ============================================
+
+def render(db):
+    """主入口函式（供 main.py 動態載入使用）
+    
+    Args:
+        db: SupabaseDB 實例（由 main.py 傳入）
+    """
+    render_rent_page(db)
+
+
+def render_rent_page(db):
+    """渲染租金管理主頁面
+    
+    Args:
+        db: SupabaseDB 實例
+    """
     st.title("💰 租金管理")
     
-    service = PaymentService()
+    service = PaymentService(db)
     
     # 頁籤
     tab1, tab2, tab3, tab4 = st.tabs([
@@ -35,6 +54,10 @@ def render_rent_page():
     with tab4:
         render_reports_tab(service)
 
+
+# ============================================
+# 各頁籤渲染函式
+# ============================================
 
 def render_batch_schedule_tab(service: PaymentService):
     """批量建立排程頁籤"""
@@ -94,8 +117,10 @@ def render_monthly_summary_tab(service: PaymentService):
     
     # 選擇期間
     col1, col2 = st.columns(2)
+    
     with col1:
         year = st.selectbox("年份", range(2020, 2031), index=6)  # 預設 2026
+    
     with col2:
         month = st.selectbox("月份", range(1, 13), index=datetime.now().month - 1)
     
@@ -179,7 +204,7 @@ def render_payment_management_tab(service: PaymentService):
         # 顯示表格
         st.dataframe(
             df[[
-                'room_number', 'tenant_name', 'payment_year', 
+                'room_number', 'tenant_name', 'payment_year',
                 'payment_month', 'amount', 'due_date', 'status'
             ]],
             use_container_width=True,
@@ -214,7 +239,7 @@ def render_payment_management_tab(service: PaymentService):
                         f"✅ 完成！成功 {results['success']} 筆，失敗 {results['failed']} 筆"
                     )
                     st.rerun()
-        
+    
     except Exception as e:
         st.error(f"❌ 載入資料失敗: {str(e)}")
         logger.error(f"收款管理錯誤: {str(e)}", exc_info=True)
@@ -245,42 +270,47 @@ def render_monthly_trend_report(service: PaymentService):
 
 def render_tenant_history_report(service: PaymentService):
     """房客繳款歷史"""
-    from repository.tenant_repository import TenantRepository
-    
-    tenant_repo = TenantRepository()
-    tenants = tenant_repo.get_active_tenants()
-    
-    if not tenants:
-        st.warning("沒有活躍房客")
-        return
-    
-    # 選擇房客
-    tenant_options = {
-        t['room_number']: f"{t['room_number']} - {t['tenant_name']}"
-        for t in tenants
-    }
-    
-    selected_room = st.selectbox(
-        "選擇房客",
-        options=list(tenant_options.keys()),
-        format_func=lambda x: tenant_options[x]
-    )
-    
-    # 載入歷史
-    history = service.get_tenant_payment_history(selected_room, limit=12)
-    
-    if history:
-        df = pd.DataFrame(history)
-        st.dataframe(
-            df[[
-                'payment_year', 'payment_month', 'amount', 
-                'status', 'paid_date', 'due_date'
-            ]],
-            use_container_width=True,
-            hide_index=True
+    try:
+        from repository.tenant_repository import TenantRepository
+        
+        tenant_repo = TenantRepository()
+        tenants = tenant_repo.get_active_tenants()
+        
+        if not tenants:
+            st.warning("沒有活躍房客")
+            return
+        
+        # 選擇房客
+        tenant_options = {
+            t['room_number']: f"{t['room_number']} - {t['tenant_name']}"
+            for t in tenants
+        }
+        
+        selected_room = st.selectbox(
+            "選擇房客",
+            options=list(tenant_options.keys()),
+            format_func=lambda x: tenant_options[x]
         )
-    else:
-        st.info("此房客尚無繳款記錄")
+        
+        # 載入歷史
+        history = service.get_tenant_payment_history(selected_room, limit=12)
+        
+        if history:
+            df = pd.DataFrame(history)
+            st.dataframe(
+                df[[
+                    'payment_year', 'payment_month', 'amount',
+                    'status', 'paid_date', 'due_date'
+                ]],
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.info("此房客尚無繳款記錄")
+    
+    except Exception as e:
+        st.error(f"❌ 載入失敗: {str(e)}")
+        logger.error(f"房客歷史報表錯誤: {str(e)}", exc_info=True)
 
 
 def render_annual_report(service: PaymentService):
@@ -289,6 +319,9 @@ def render_annual_report(service: PaymentService):
     # TODO: 實作年度總收入、收款率等統計
 
 
-# 主入口（供 main.py 呼叫）
+# ============================================
+# 本機測試入口
+# ============================================
+
 if __name__ == "__main__":
-    render_rent_page()
+    render_rent_page(None)
