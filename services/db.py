@@ -237,9 +237,9 @@ class SupabaseDB:
                 
                 cur.execute(f"""
                     SELECT id, room_number, tenant_name, phone, deposit, base_rent,
-                           lease_start, lease_end, payment_method, has_water_fee,
-                           annual_discount_months, discount_notes, last_acc_cleaning_date,
-                           is_active, created_at
+                            lease_start, lease_end, payment_method, has_water_fee,
+                            annual_discount_months, discount_notes, last_ac_cleaning_date,
+                            is_active, created_at
                     FROM tenants {condition}
                     ORDER BY room_number
                 """)
