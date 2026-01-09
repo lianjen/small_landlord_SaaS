@@ -7,10 +7,12 @@ from datetime import datetime
 import requests
 import logging
 
+
 logger = logging.getLogger(__name__)
 
 
 # ============== Tab 1: 系統設定 ==============
+
 
 def render_settings_tab(db):
     """系統設定頁面"""
@@ -140,6 +142,7 @@ def render_settings_tab(db):
 
 # ============== Tab 2: 手動觸發 ==============
 
+
 def render_manual_tab(db):
     """手動觸發通知"""
     st.subheader("🚀 手動觸發通知")
@@ -235,6 +238,7 @@ def render_manual_tab(db):
 
 # ============== Tab 3: 通知記錄 ==============
 
+
 def render_logs_tab(db):
     """通知記錄查看"""
     st.subheader("📜 通知記錄")
@@ -325,6 +329,7 @@ def render_logs_tab(db):
 
 # ============== 輔助函數 ==============
 
+
 def get_all_settings(db) -> dict:
     """取得所有系統設定"""
     try:
@@ -340,8 +345,6 @@ def get_all_settings(db) -> dict:
         return {}
 
 
-def save_setting(db, key: str, value: str):
-    """儲存單
 def save_setting(db, key: str, value: str):
     """儲存單一設定"""
     try:
@@ -456,8 +459,9 @@ def get_notification_logs(db, days: int, recipient_type: str = None, status: str
 
 # ============== 主函數 ==============
 
+
 def render(db):
-    """通知管理主頁面"""
+    """通知管理主頁面（供 main.py 呼叫）"""
     st.title("📬 通知管理")
     
     tab1, tab2, tab3 = st.tabs(["⚙️ 系統設定", "🚀 手動觸發", "📜 通知記錄"])
