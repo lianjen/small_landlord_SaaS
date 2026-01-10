@@ -1,4 +1,4 @@
-# views/rent.py (重構版 - 約 180 行)
+# views/rent.py (重構版 - 約 200 行)
 """
 租金管理頁面
 職責：UI 展示與使用者互動，業務邏輯委派給 PaymentService
@@ -19,17 +19,13 @@ def render(db):
     """主入口函式（供 main.py 動態載入使用）
     
     Args:
-        db: SupabaseDB 實例（由 main.py 傳入）
+        db: SupabaseDB 實例（由 main.py 傳入，但 PaymentService 不使用）
     """
-    render_rent_page(db)
+    render_rent_page()
 
 
-def render_rent_page(db):
-    """渲染租金管理主頁面
-    
-    Args:
-        db: SupabaseDB 實例
-    """
+def render_rent_page():
+    """渲染租金管理主頁面"""
     st.title("💰 租金管理")
     
     service = PaymentService()
@@ -54,10 +50,6 @@ def render_rent_page(db):
     with tab4:
         render_reports_tab(service)
 
-
-# ============================================
-# 各頁籤渲染函式
-# ============================================
 
 def render_batch_schedule_tab(service: PaymentService):
     """批量建立排程頁籤"""
@@ -324,5 +316,4 @@ def render_annual_report(service: PaymentService):
 # ============================================
 
 if __name__ == "__main__":
-    render_rent_page(None)
-
+    render_rent_page()
