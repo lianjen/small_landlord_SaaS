@@ -1,8 +1,6 @@
 """
-繳費追蹤 - 錯誤修復版
-修復: KeyError - 動態檢查欄位是否存在
+繳費追蹤 - 英文狀態版
 """
-
 import streamlit as st
 import pandas as pd
 from datetime import date, datetime, timedelta
@@ -15,12 +13,16 @@ except ImportError:
     def section_header(title, icon="", divider=True):
         st.markdown(f"### {icon} {title}")
         if divider: st.divider()
+    
     def metric_card(label, value, delta="", icon="", color="normal"):
         st.metric(label, value, delta)
+    
     def empty_state(msg, icon="", desc=""):
         st.info(f"{icon} {msg}")
+    
     def data_table(df, key="table"):
         st.dataframe(df, use_container_width=True, key=key)
+    
     def info_card(title, content, icon="", type="info"):
         st.info(f"{icon} {title}: {content}")
 
@@ -32,6 +34,12 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# 狀態對應（英文 -> 中文顯示）
+STATUS_MAP = {
+    'unpaid': '未繳',
+    'paid': '已繳',
+    'overdue': '逾期'
+}
 
 def get_overdue_days(due_date) -> int:
     """計算逾期天數"""
@@ -53,7 +61,9 @@ def get_overdue_days(due_date) -> int:
 
 def categorize_payment_status(row) -> str:
     """分類繳費狀態"""
-    if row.get('status') == '已繳':
+    status = row.get('status', '')
+    
+    if status == 'paid':
         return '已繳'
     
     overdue_days = get_overdue_days(row.get('due_date'))
@@ -93,12 +103,17 @@ def render(db):
         )
     
     with col3:
-        filter_status = st.selectbox(
+        # 使用中文顯示，但查詢用英文
+        filter_status_display = st.selectbox(
             "狀態",
-            [None, "未繳", "已繳"],
+            [None, "未繳", "已繳", "逾期"],
             format_func=lambda x: "全部" if x is None else x,
             key="track_status"
         )
+        
+        # 轉換為英文查詢
+        status_reverse_map = {'未繳': 'unpaid', '已繳': 'paid', '逾期': 'overdue'}
+        filter_status = status_reverse_map.get(filter_status_display) if filter_status_display else None
     
     with col4:
         filter_rooms = st.multiselect(
@@ -118,6 +133,7 @@ def render(db):
         )
     except Exception as e:
         st.error(f"❌ 查詢失敗: {e}")
+        logger.error(f"查詢失敗: {e}", exc_info=True)
         return
     
     if df.empty:
@@ -142,9 +158,9 @@ def render(db):
     section_header("統計概覽", "📊")
     
     total_count = len(df)
-    unpaid_df = df[df['status'] == '未繳'] if 'status' in df.columns else pd.DataFrame()
-    paid_df = df[df['status'] == '已繳'] if 'status' in df.columns else pd.DataFrame()
-    overdue_df = df[(df['status'] == '未繳') & (df['逾期天數'] > 0)] if 'status' in df.columns else pd.DataFrame()
+    unpaid_df = df[df['status'] == 'unpaid'] if 'status' in df.columns else pd.DataFrame()
+    paid_df = df[df['status'] == 'paid'] if 'status' in df.columns else pd.DataFrame()
+    overdue_df = df[(df['status'] == 'unpaid') & (df['逾期天數'] > 0)] if 'status' in df.columns else pd.DataFrame()
     
     col_s1, col_s2, col_s3, col_s4, col_s5 = st.columns(5)
     
@@ -152,15 +168,15 @@ def render(db):
         metric_card("總筆數", str(total_count), icon="📋", color="normal")
     
     with col_s2:
-        paid_amount = paid_df['paid_amount'].sum() if 'paid_amount' in paid_df.columns else 0
+        paid_amount = paid_df['paid_amount'].sum() if 'paid_amount' in paid_df.columns and not paid_df.empty else 0
         metric_card("已繳", str(len(paid_df)), f"${paid_amount:,.0f}", "✅", "success")
     
     with col_s3:
-        unpaid_amount = unpaid_df['amount'].sum() if 'amount' in unpaid_df.columns else 0
+        unpaid_amount = unpaid_df['amount'].sum() if 'amount' in unpaid_df.columns and not unpaid_df.empty else 0
         metric_card("未繳", str(len(unpaid_df)), f"${unpaid_amount:,.0f}", "⏳", "warning")
     
     with col_s4:
-        overdue_amount = overdue_df['amount'].sum() if 'amount' in overdue_df.columns else 0
+        overdue_amount = overdue_df['amount'].sum() if 'amount' in overdue_df.columns and not overdue_df.empty else 0
         metric_card("逾期", str(len(overdue_df)), f"${overdue_amount:,.0f}", "🚨", "error")
     
     with col_s5:
@@ -243,14 +259,15 @@ def render(db):
                     
                     if fail > 0:
                         st.error(f"❌ 失敗 {fail} 筆")
+                
                 except Exception as e:
                     st.error(f"❌ 批量標記失敗: {e}")
+                    logger.error(f"批量標記失敗: {e}", exc_info=True)
         
         st.divider()
     
     # === 資料表格 ===
     section_header("詳細列表", "📋")
-    
     st.write(f"共 {len(df)} 筆記錄")
     
     # 格式化顯示
@@ -266,14 +283,14 @@ def render(db):
         display_df['應收金額'] = display_df['amount'].apply(lambda x: f"${x:,.0f}")
     
     if 'paid_amount' in display_df.columns:
-        display_df['實收金額'] = display_df['paid_amount'].apply(lambda x: f"${x:,.0f}")
+        display_df['實收金額'] = display_df['paid_amount'].apply(lambda x: f"${x:,.0f}" if pd.notna(x) else "$0")
     
-    # 狀態標記
+    # 狀態標記（英文轉中文顯示）
     def status_with_icon(row):
         status = row.get('status', 'N/A')
         overdue = row.get('逾期天數', 0)
         
-        if status == '已繳':
+        if status == 'paid':
             return '✅ 已繳'
         elif overdue > 7:
             return f'🚨 逾期 {overdue} 天'
@@ -291,7 +308,6 @@ def render(db):
     # 選擇要顯示的欄位（動態檢查）
     available_cols = display_df.columns.tolist()
     preferred_cols = ['id', 'room_number', 'tenant_name', '期間', '應收金額', '實收金額', 'payment_method', '到期日', '狀態標記']
-    
     cols_to_show = [col for col in preferred_cols if col in available_cols]
     
     rename_cols = {
@@ -324,7 +340,6 @@ def render(db):
     section_header("匯出資料", "📥", divider=False)
     
     csv = df.to_csv(index=False, encoding='utf-8-sig')
-    
     st.download_button(
         "📥 下載 CSV",
         csv,
