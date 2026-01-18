@@ -135,7 +135,7 @@ class DatabaseConnectionPool:
 
 # ===== TITLE: 主要資料庫類別 =====
 class SupabaseDB:
-    """Supabase 資料庫操作類別 - v2.2 完整版"""
+    """Supabase 資料庫操作類別 - v2.3 完整版"""
     
     def __init__(self):
         self.pool = DatabaseConnectionPool()
@@ -207,14 +207,7 @@ class SupabaseDB:
     # ===== TITLE: 房客管理 =====
     
     def get_tenants(self, active_only: bool = True) -> pd.DataFrame:
-        """取得房客列表
-        
-        Args:
-            active_only: 是否只顯示啟用中的房客
-        
-        Returns:
-            DataFrame 包含所有房客資料
-        """
+        """取得房客列表"""
         def query():
             with self.get_connection() as conn:
                 cur = conn.cursor()
@@ -243,25 +236,13 @@ class SupabaseDB:
                    base_rent: float, start: date, end: date, payment_method: str,
                    has_water_fee: bool = False, annual_discount_months: int = 0,
                    discount_notes: str = "") -> Tuple[bool, str]:
-        """新增房客
-        
-        Args:
-            room: 房號
-            name: 房客姓名
-            phone: 電話
-            ...
-        
-        Returns:
-            (成功與否, 訊息)
-        """
+        """新增房客"""
         try:
-            # === TITLE: 驗證房號 ===
             all_rooms = ROOMS.ALL_ROOMS if CONSTANTS_LOADED else BackupConstants.ROOMS.ALL_ROOMS
             if room not in all_rooms:
                 logger.warning(f"❌ 無效的房號: {room}")
                 return False, f"無效的房號: {room}"
             
-            # === TITLE: 驗證付款方式 ===
             methods = PAYMENT.METHODS if CONSTANTS_LOADED else BackupConstants.PAYMENT.METHODS
             if payment_method not in methods:
                 logger.warning(f"❌ 無效的付款方式: {payment_method}")
@@ -270,7 +251,6 @@ class SupabaseDB:
             with self.get_connection() as conn:
                 cur = conn.cursor()
                 
-                # === TITLE: 檢查房間是否已被占用 ===
                 cur.execute("""
                     SELECT COUNT(*) FROM tenants 
                     WHERE room_number = %s AND is_active = true
@@ -279,7 +259,6 @@ class SupabaseDB:
                     logger.warning(f"❌ 房間 {room} 已被占用")
                     return False, f"房間 {room} 已被占用"
                 
-                # === TITLE: 新增房客 ===
                 cur.execute("""
                     INSERT INTO tenants (
                         room_number, tenant_name, phone, deposit, base_rent,
@@ -317,7 +296,6 @@ class SupabaseDB:
                 cur.execute("""
                     UPDATE tenants SET
                         room_number = %s, tenant_name = %s, phone = %s,
-                        # === TITLE: 更新所有欄位 ===
                         deposit = %s, base_rent = %s, lease_start = %s, lease_end = %s,
                         payment_method = %s, has_water_fee = %s,
                         annual_discount_months = %s, discount_notes = %s
@@ -356,17 +334,7 @@ class SupabaseDB:
     
     def get_payment_schedule(self, year: Optional[int] = None, month: Optional[int] = None,
                            room: Optional[str] = None, status: Optional[str] = None) -> pd.DataFrame:
-        """取得租金排程
-        
-        Args:
-            year: 年份篩選
-            month: 月份篩選
-            room: 房號篩選
-            status: 狀態篩選
-        
-        Returns:
-            DataFrame 包含租金排程資料
-        """
+        """取得租金排程"""
         def query():
             with self.get_connection() as conn:
                 cur = conn.cursor()
@@ -405,19 +373,397 @@ class SupabaseDB:
                 return pd.DataFrame(data, columns=columns)
         
         return self.retry_on_failure(query)
+    
+    def add_payment_schedule(self, room: str, tenant_name: str, year: int, month: int,
+                            amount: float, payment_method: str, due_date: Optional[date] = None) -> Tuple[bool, str]:
+        """新增單筆租金排程"""
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                
+                cur.execute("""
+                    SELECT COUNT(*) FROM payment_schedule
+                    WHERE room_number = %s AND payment_year = %s AND payment_month = %s
+                """, (room, year, month))
+                
+                if cur.fetchone()[0] > 0:
+                    logger.warning(f"❌ 租金記錄已存在: {room} {year}/{month}")
+                    return False, f"{year}/{month} 的 {room} 租金記錄已存在"
+                
+                cur.execute("""
+                    INSERT INTO payment_schedule (
+                        room_number, tenant_name, payment_year, payment_month,
+                        amount, paid_amount, payment_method, due_date, status
+                    ) VALUES (%s, %s, %s, %s, %s, 0, %s, %s, 'unpaid')
+                """, (room, tenant_name, year, month, amount, payment_method, due_date))
+                
+                log_db_operation("INSERT", "payment_schedule", True, 1)
+                logger.info(f"✅ 新增租金: {room} {year}/{month} ${amount}")
+                return True, "新增租金成功"
+        
+        except Exception as e:
+            log_db_operation("INSERT", "payment_schedule", False, error=str(e))
+            logger.error(f"❌ 新增租金失敗: {str(e)}")
+            return False, f"新增失敗: {str(e)[:100]}"
+    
+    def mark_payment_done(self, payment_id: int, paid_amount: Optional[float] = None) -> bool:
+        """標記租金為已繳"""
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                
+                if paid_amount:
+                    cur.execute("""
+                        UPDATE payment_schedule SET
+                            status = 'paid',
+                            paid_amount = %s,
+                            updated_at = NOW()
+                        WHERE id = %s
+                    """, (paid_amount, payment_id))
+                else:
+                    cur.execute("""
+                        UPDATE payment_schedule SET
+                            status = 'paid',
+                            paid_amount = amount,
+                            updated_at = NOW()
+                        WHERE id = %s
+                    """, (payment_id,))
+                
+                log_db_operation("UPDATE", "payment_schedule", True, 1)
+                logger.info(f"✅ 標記已繳: ID {payment_id}")
+                return True
+        
+        except Exception as e:
+            log_db_operation("UPDATE", "payment_schedule", False, error=str(e))
+            logger.error(f"❌ 標記已繳失敗: {str(e)}")
+            return False
+    
+    def get_overdue_payments(self) -> pd.DataFrame:
+        """取得逾期租金記錄"""
+        def query():
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT 
+                        room_number, tenant_name, payment_year, payment_month,
+                        amount, due_date
+                    FROM payment_schedule
+                    WHERE status = 'unpaid' AND due_date < CURRENT_DATE
+                    ORDER BY due_date
+                """)
+                columns = [desc[0] for desc in cur.description]
+                data = cur.fetchall()
+                
+                log_db_operation("SELECT", "payment_schedule (overdue)", True, len(data))
+                logger.warning(f"⚠️ 發現 {len(data)} 筆逾期租金")
+                return pd.DataFrame(data, columns=columns)
+        
+        return self.retry_on_failure(query)
+    
+    def check_payment_exists(self, room: str, year: int, month: int) -> bool:
+        """檢查租金記錄是否存在"""
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT COUNT(*) FROM payment_schedule
+                    WHERE room_number = %s AND payment_year = %s AND payment_month = %s
+                """, (room, year, month))
+                
+                exists = cur.fetchone()[0] > 0
+                logger.debug(f"🔍 檢查租金記錄 {room} {year}/{month} - {'存在' if exists else '不存在'}")
+                return exists
+        except Exception as e:
+            logger.error(f"❌ 檢查租金記錄失敗: {str(e)}")
+            return False
+    
+    def batch_create_payment_schedule(self, schedules: list) -> tuple:
+        """批量建立租金排程"""
+        success_count = 0
+        skip_count = 0
+        fail_count = 0
+        
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                
+                for schedule in schedules:
+                    try:
+                        cur.execute("""
+                            SELECT COUNT(*) FROM payment_schedule
+                            WHERE room_number = %s AND payment_year = %s AND payment_month = %s
+                        """, (schedule['room_number'], schedule['payment_year'], schedule['payment_month']))
+                        
+                        if cur.fetchone()[0] > 0:
+                            skip_count += 1
+                            continue
+                        
+                        cur.execute("""
+                            INSERT INTO payment_schedule (
+                                room_number, tenant_name, payment_year, payment_month,
+                                amount, paid_amount, payment_method, due_date, status
+                            ) VALUES (%s, %s, %s, %s, %s, 0, %s, %s, 'unpaid')
+                        """, (
+                            schedule['room_number'],
+                            schedule['tenant_name'],
+                            schedule['payment_year'],
+                            schedule['payment_month'],
+                            schedule['amount'],
+                            schedule['payment_method'],
+                            schedule['due_date']
+                        ))
+                        success_count += 1
+                    
+                    except Exception as e:
+                        logger.error(f"❌ 新增租金失敗 ({schedule['room_number']}): {e}")
+                        fail_count += 1
+                
+                log_db_operation("INSERT", "payment_schedule (batch)", True, success_count)
+                logger.info(f"✅ 批量建立租金: 成功 {success_count}, 跳過 {skip_count}, 失敗 {fail_count}")
+                return success_count, skip_count, fail_count
+        
+        except Exception as e:
+            logger.error(f"❌ 批量建立租金失敗: {str(e)}")
+            return 0, 0, len(schedules)
+    
+    def get_payment_statistics(self, year: int = None, month: int = None) -> dict:
+        """取得租金統計"""
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                
+                conditions = ["1=1"]
+                params = []
+                
+                if year:
+                    conditions.append("payment_year = %s")
+                    params.append(year)
+                if month:
+                    conditions.append("payment_month = %s")
+                    params.append(month)
+                
+                where_clause = " AND ".join(conditions)
+                cur.execute(f"""
+                    SELECT 
+                        COUNT(*) as total_count,
+                        SUM(amount) as total_amount,
+                        SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END) as paid_count,
+                        SUM(CASE WHEN status = 'paid' THEN paid_amount ELSE 0 END) as paid_amount,
+                        SUM(CASE WHEN status = 'unpaid' THEN 1 ELSE 0 END) as unpaid_count,
+                        SUM(CASE WHEN status = 'unpaid' THEN amount ELSE 0 END) as unpaid_amount
+                    FROM payment_schedule
+                    WHERE {where_clause}
+                """, params)
+                
+                row = cur.fetchone()
+                if not row or row[0] == 0:
+                    logger.debug("📊 查無租金統計資料")
+                    return {
+                        'total_amount': 0,
+                        'paid_amount': 0,
+                        'unpaid_amount': 0,
+                        'total_count': 0,
+                        'paid_count': 0,
+                        'unpaid_count': 0,
+                        'payment_rate': 0
+                    }
+                
+                total_count, total_amount, paid_count, paid_amount, unpaid_count, unpaid_amount = row
+                payment_rate = (paid_count / total_count * 100) if total_count > 0 else 0
+                
+                log_db_operation("SELECT", "payment_schedule (statistics)", True, total_count)
+                logger.debug(f"📊 應收: {total_amount or 0:,.0f}, 已收: {paid_amount or 0:,.0f}, 收款率: {payment_rate:.1f}%")
+                
+                return {
+                    'total_amount': float(total_amount or 0),
+                    'paid_amount': float(paid_amount or 0),
+                    'unpaid_amount': float(unpaid_amount or 0),
+                    'total_count': int(total_count),
+                    'paid_count': int(paid_count),
+                    'unpaid_count': int(unpaid_count),
+                    'payment_rate': round(payment_rate, 1)
+                }
+        
+        except Exception as e:
+            logger.error(f"❌ 取得租金統計失敗: {str(e)}")
+            return {}
+    
+    def get_payment_trends(self, year: int) -> list:
+        """取得租金趨勢（按月）"""
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT 
+                        payment_month,
+                        SUM(amount) as total_amount,
+                        SUM(CASE WHEN status = 'paid' THEN paid_amount ELSE 0 END) as paid_amount,
+                        COUNT(*) as total_count,
+                        SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END) as paid_count
+                    FROM payment_schedule
+                    WHERE payment_year = %s
+                    GROUP BY payment_month
+                    ORDER BY payment_month
+                """, (year,))
+                
+                trends = []
+                for row in cur.fetchall():
+                    month, total_amt, paid_amt, total_cnt, paid_cnt = row
+                    payment_rate = (paid_cnt / total_cnt * 100) if total_cnt > 0 else 0
+                    
+                    trends.append({
+                        'month': int(month),
+                        'total_amount': float(total_amt or 0),
+                        'paid_amount': float(paid_amt or 0),
+                        'payment_rate': round(payment_rate, 1)
+                    })
+                
+                log_db_operation("SELECT", "payment_schedule (trends)", True, len(trends))
+                logger.info(f"📊 取得 {year} 年租金趨勢: {len(trends)} 筆")
+                return trends
+        
+        except Exception as e:
+            logger.error(f"❌ 取得租金趨勢失敗: {str(e)}")
+            return []
+    
+    def batch_mark_paid(self, payment_ids: list) -> tuple:
+        """批量標記為已繳"""
+        success_count = 0
+        fail_count = 0
+        
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                
+                for payment_id in payment_ids:
+                    try:
+                        cur.execute("""
+                            UPDATE payment_schedule SET
+                                status = 'paid',
+                                paid_amount = amount,
+                                updated_at = NOW()
+                            WHERE id = %s
+                        """, (payment_id,))
+                        success_count += 1
+                    except Exception as e:
+                        logger.error(f"❌ 標記已繳失敗 (ID {payment_id}): {e}")
+                        fail_count += 1
+                
+                log_db_operation("UPDATE", "payment_schedule (batch)", True, success_count)
+                logger.info(f"✅ 批量標記: 成功 {success_count}, 失敗 {fail_count}")
+                return success_count, fail_count
+        
+        except Exception as e:
+            logger.error(f"❌ 批量標記失敗: {str(e)}")
+            return 0, len(payment_ids)
+    
+    def delete_payment_schedule(self, payment_id: int) -> tuple:
+        """刪除租金排程"""
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    DELETE FROM payment_schedule WHERE id = %s
+                """, (payment_id,))
+                
+                log_db_operation("DELETE", "payment_schedule", True, 1)
+                logger.info(f"✅ 刪除租金排程 ID {payment_id}")
+                return True, "刪除成功"
+        
+        except Exception as e:
+            log_db_operation("DELETE", "payment_schedule", False, error=str(e))
+            logger.error(f"❌ 刪除租金排程失敗: {str(e)}")
+            return False, f"刪除失敗: {str(e)}"
 
-    # ===== TITLE: 電費管理 - 新增讀數記錄功能 =====
+    # ===== TITLE: 備忘錄管理 =====
+    
+    def add_memo(self, text: str, priority: str = "normal") -> bool:
+        """新增備忘錄"""
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO memos (memo_text, priority)
+                    VALUES (%s, %s)
+                """, (text, priority))
+                
+                log_db_operation("INSERT", "memos", True, 1)
+                logger.info(f"✅ 新增備忘錄: {priority}")
+                return True
+        
+        except Exception as e:
+            log_db_operation("INSERT", "memos", False, error=str(e))
+            logger.error(f"❌ 新增備忘錄失敗: {str(e)}")
+            return False
+    
+    def get_memos(self, include_completed: bool = False) -> List[Dict]:
+        """取得備忘錄列表"""
+        def query():
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                condition = "" if include_completed else "WHERE is_completed = false"
+                cur.execute(f"""
+                    SELECT id, memo_text, priority, is_completed, created_at
+                    FROM memos
+                    {condition}
+                    ORDER BY is_completed, priority DESC, created_at DESC
+                """)
+                
+                columns = [desc[0] for desc in cur.description]
+                return [dict(zip(columns, row)) for row in cur.fetchall()]
+        
+        return self.retry_on_failure(query)
+
+    # ===== TITLE: 支出管理 =====
+    
+    def add_expense(self, expense_date: date, category: str, amount: float, description: str) -> Tuple[bool, str]:
+        """新增支出記錄"""
+        try:
+            categories = EXPENSE.CATEGORIES if CONSTANTS_LOADED else BackupConstants.EXPENSE.CATEGORIES
+            if category not in categories:
+                logger.warning(f"❌ 無效的支出類別: {category}")
+                return False, f"無效的支出類別: {category}"
+            
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO expenses (expense_date, category, amount, description)
+                    VALUES (%s, %s, %s, %s)
+                """, (expense_date, category, amount, description))
+                
+                log_db_operation("INSERT", "expenses", True, 1)
+                logger.info(f"✅ 新增支出: {category} NT${amount:,.0f}")
+                return True, "新增支出成功"
+        
+        except Exception as e:
+            log_db_operation("INSERT", "expenses", False, error=str(e))
+            logger.error(f"❌ 新增支出失敗: {str(e)}")
+            return False, f"新增失敗: {str(e)[:100]}"
+    
+    def get_expenses(self, limit: int = 50) -> pd.DataFrame:
+        """取得支出記錄"""
+        def query():
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT id, expense_date, category, amount, description, created_at
+                    FROM expenses
+                    ORDER BY expense_date DESC
+                    LIMIT %s
+                """, (limit,))
+                
+                columns = [desc[0] for desc in cur.description]
+                data = cur.fetchall()
+                
+                log_db_operation("SELECT", "expenses", True, len(data))
+                return pd.DataFrame(data, columns=columns)
+        
+        return self.retry_on_failure(query)
+
+    # ===== TITLE: 電費管理 =====
     
     def get_latest_meter_reading(self, room: str, period_id: int) -> Optional[float]:
-        """取得房間最新電表讀數
-        
-        Args:
-            room: 房號
-            period_id: 當前期間ID（會往前查找上一期）
-        
-        Returns:
-            最新的本期讀數，如果沒有則返回 None
-        """
+        """取得房間最新電表讀數"""
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
@@ -440,18 +786,7 @@ class SupabaseDB:
     
     def save_electricity_reading(self, period_id: int, room: str, 
                                 previous: float, current: float, kwh_used: float) -> Tuple[bool, str]:
-        """儲存電表讀數
-        
-        Args:
-            period_id: 計費期間ID
-            room: 房號
-            previous: 上期讀數
-            current: 本期讀數
-            kwh_used: 使用度數
-        
-        Returns:
-            (成功與否, 訊息)
-        """
+        """儲存電表讀數"""
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
@@ -517,7 +852,6 @@ class SupabaseDB:
                     }
                     for row in rows
                 ]
-                # === TITLE: 記錄查詢結果 ===
                 log_db_operation("SELECT", "electricity_periods", True, len(result))
                 return result
         except Exception as e:
@@ -548,7 +882,6 @@ class SupabaseDB:
             cursor = conn.cursor()
             try:
                 for result in calc_results:
-                    # 先儲存讀數記錄
                     if 'previous_reading' in result and 'current_reading' in result:
                         cursor.execute("""
                             INSERT INTO electricity_readings 
@@ -567,7 +900,6 @@ class SupabaseDB:
                             result['使用度數']
                         ))
                     
-                    # 再儲存計費記錄
                     cursor.execute("""
                         INSERT INTO electricity_records 
                         (period_id, room_number, room_type, usage_kwh, public_share_kwh, total_kwh, amount_due, payment_status)
@@ -577,7 +909,6 @@ class SupabaseDB:
                             usage_kwh = EXCLUDED.usage_kwh,
                             public_share_kwh = EXCLUDED.public_share_kwh,
                             total_kwh = EXCLUDED.total_kwh,
-                            # === TITLE: 更新金額 ===
                             amount_due = EXCLUDED.amount_due
                     """, (
                         period_id,
@@ -627,7 +958,6 @@ class SupabaseDB:
                 
                 log_db_operation("SELECT", "electricity_records", True, len(data))
                 return pd.DataFrame(data, columns=["room_number", "amount_due", "paid_amount", "payment_status", "payment_date", "notes", "updated_at"])
-                # === TITLE: 返回結果 ===
         except Exception as e:
             log_db_operation("SELECT", "electricity_records", False, error=str(e))
             logger.error(f"❌ 取得繳費記錄失敗: {str(e)}")
@@ -670,7 +1000,6 @@ class SupabaseDB:
                         COUNT(CASE WHEN payment_status = 'paid' THEN 1 END) as paid_rooms,
                         COUNT(CASE WHEN payment_status = 'unpaid' THEN 1 END) as unpaid_rooms,
                         COUNT(*) as total_rooms
-                        # === TITLE: 統計查詢 ===
                     FROM electricity_records
                     WHERE period_id = %s
                 """, (period_id,))
@@ -703,11 +1032,7 @@ class SupabaseDB:
 # ===== TITLE: Streamlit 快取 =====
 @st.cache_resource
 def get_db() -> SupabaseDB:
-    """取得資料庫實例 - Streamlit 快取
-    
-    Returns:
-        SupabaseDB 實例
-    """
+    """取得資料庫實例 - Streamlit 快取"""
     logger.info("🔄 初始化 SupabaseDB 實例")
     return SupabaseDB()
 
@@ -715,7 +1040,6 @@ def get_db() -> SupabaseDB:
 if __name__ == "__main__":
     logger.info("✅ services/db.py 模組載入完成")
     
-    # === TITLE: 1. 測試常數驗證 ===
     print("=" * 50)
     print("測試 1: 常數驗證")
     print("=" * 50)
@@ -725,7 +1049,6 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"❌ 常數驗證失敗: {e}")
     
-    # === TITLE: 2. 測試連線池 ===
     print("\n" + "=" * 50)
     print("測試 2: 連線池初始化")
     print("=" * 50)
@@ -736,4 +1059,3 @@ if __name__ == "__main__":
         print(f"❌ 連線池建立失敗: {e}")
     
     logger.info("✅ services/db.py 測試完成")
-    # === TITLE: 2. 測試完成 ===
