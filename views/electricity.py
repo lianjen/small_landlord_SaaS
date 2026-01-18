@@ -1,7 +1,7 @@
 """
-電費管理 - v2.3 完整版
-支援 1F / 2F / 3F / 4F 分開計算
-修復：首次輸入可編輯上期，第二次後自動鎖定
+電費管理 - v2.4 修復版
+✅ 修正：2A~4D 共同分攤所有公用電（而非按樓層單獨分攤）
+✅ 1A/1B 獨立電表，不參與公用電分攤
 """
 
 import streamlit as st
@@ -41,8 +41,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# ============== 樓層配置 ==============
 
+# ============== 樓層配置 ==============
 FLOOR_CONFIG = {
     '1F': {
         'label': '1F 台電單',
@@ -62,14 +62,19 @@ FLOOR_CONFIG = {
     }
 }
 
-# ============== 計算邏輯 ==============
 
+# ============== 計算邏輯 (✅ 修復版) ==============
 def calculate_electricity_charges(
     taipower_bills: List[Dict],
     room_readings: Dict[str, float]
 ) -> Dict:
     """
-    計算電費 - 改良版：支援多樓層獨立計算
+    計算電費 - v2.4 修復版
+    
+    ✅ 修正邏輯：
+    1. 公用電 = 全部台電度數 - 所有房間私用度數
+    2. 2A~4D (10間) 平均分攤所有公用電
+    3. 1A/1B 獨立電表，分攤 = 0
     
     Args:
         taipower_bills: [{'floor_label': '1F', 'amount': 1000, 'kwh': 100}, ...]
@@ -78,15 +83,92 @@ def calculate_electricity_charges(
     Returns:
         計費結果字典
     """
-    # 計算總計
+    # === Step 1: 計算總台電度數與金額 ===
     total_amount = sum(bill['amount'] for bill in taipower_bills)
     total_kwh = sum(bill['kwh'] for bill in taipower_bills)
     
     if total_kwh <= 0:
         return None
     
-    # 按樓層分組計算
+    # 全域單位電價（以總台電為基準）
+    global_unit_price = round(total_amount / total_kwh, 2)
+    
+    # === Step 2: 計算所有私用度數 ===
+    total_private_kwh = sum(room_readings.get(room, 0) for room in ROOMS.ALL_ROOMS)
+    
+    # === Step 3: 計算總公用電 ===
+    total_public_kwh = max(0, total_kwh - total_private_kwh)
+    
+    # === Step 4: 分攤房間數（2A~4D 且有讀數的房間） ===
+    sharing_rooms = [
+        room for room in ROOMS.SHARING_ROOMS 
+        if room_readings.get(room, 0) > 0
+    ]
+    sharing_count = len(sharing_rooms)
+    
+    # === Step 5: 每間分攤公用電 ===
+    shared_per_room = round(total_public_kwh / sharing_count, 2) if sharing_count > 0 else 0
+    
+    # === Step 6: 計算各房間費用 ===
     results = []
+    
+    # 獨立房間（1A、1B）
+    for room in ROOMS.EXCLUSIVE_ROOMS:
+        kwh = room_readings.get(room, 0)
+        if kwh <= 0:
+            continue
+        
+        floor = '1F'
+        room_type = "獨立房間"
+        shared_kwh = 0  # ✅ 獨立房間不分攤
+        total_room_kwh = kwh
+        charge = round(total_room_kwh * global_unit_price)
+        
+        results.append({
+            '樓層': floor,
+            '房號': room,
+            '類型': room_type,
+            '使用度數': round(kwh, 2),
+            '公用分攤': round(shared_kwh, 2),
+            '總度數': round(total_room_kwh, 2),
+            '應繳金額': charge
+        })
+    
+    # 分攤房間（2A~4D）
+    for room in ROOMS.SHARING_ROOMS:
+        kwh = room_readings.get(room, 0)
+        if kwh <= 0:
+            continue
+        
+        # 判斷樓層
+        if room in ['2A', '2B']:
+            floor = '2F'
+        elif room in ['3A', '3B', '3C', '3D']:
+            floor = '3F'
+        elif room in ['4A', '4B', '4C', '4D']:
+            floor = '4F'
+        else:
+            floor = None
+        
+        room_type = "分攤房間"
+        shared_kwh = shared_per_room  # ✅ 平均分攤
+        total_room_kwh = kwh + shared_kwh
+        charge = round(total_room_kwh * global_unit_price)
+        
+        results.append({
+            '樓層': floor,
+            '房號': room,
+            '類型': room_type,
+            '使用度數': round(kwh, 2),
+            '公用分攤': round(shared_kwh, 2),
+            '總度數': round(total_room_kwh, 2),
+            '應繳金額': charge
+        })
+    
+    # === Step 7: 計算總收費 ===
+    total_charge = sum(r['應繳金額'] for r in results)
+    
+    # === Step 8: 生成樓層摘要（僅供參考） ===
     floor_summaries = []
     
     for bill in taipower_bills:
@@ -94,78 +176,39 @@ def calculate_electricity_charges(
         floor_amount = bill['amount']
         floor_kwh = bill['kwh']
         
-        if floor_kwh <= 0:
-            continue
-        
-        # 該樓層的房間
+        # 該樓層房間
         floor_rooms = FLOOR_CONFIG[floor_label]['rooms']
+        floor_results = [r for r in results if r['房號'] in floor_rooms]
         
-        # 該樓層房間的總度數
-        floor_room_kwh = sum(room_readings.get(room, 0) for room in floor_rooms)
-        
-        # 公用電
-        public_kwh = max(0, floor_kwh - floor_room_kwh)
-        
-        # 單位電價
-        unit_price = round(floor_amount / floor_kwh, 2)
-        
-        # 分攤房間數（只計算該樓層有讀數的房間）
-        sharing_rooms = [r for r in floor_rooms if room_readings.get(r, 0) > 0 and r in ROOMS.SHARING_ROOMS]
-        sharing_count = len(sharing_rooms)
-        
-        # 每間分攤
-        shared_per_room = round(public_kwh / sharing_count, 2) if sharing_count > 0 else 0
-        
-        # 計算該樓層各房間
-        floor_total_charge = 0
-        for room in floor_rooms:
-            kwh = room_readings.get(room, 0)
+        if floor_results:
+            floor_room_kwh = sum(r['使用度數'] for r in floor_results)
+            floor_public_kwh = floor_kwh - floor_room_kwh  # 該層的公用電（參考用）
+            floor_total_charge = sum(r['應繳金額'] for r in floor_results)
             
-            if kwh <= 0:
-                continue
-            
-            is_sharing = room in ROOMS.SHARING_ROOMS
-            room_type = "分攤房間" if is_sharing else "獨立房間"
-            shared_kwh = shared_per_room if is_sharing else 0
-            total_room_kwh = kwh + shared_kwh
-            charge = round(total_room_kwh * unit_price)
-            
-            floor_total_charge += charge
-            
-            results.append({
-                '樓層': floor_label,
-                '房號': room,
-                '類型': room_type,
-                '使用度數': round(kwh, 2),
-                '公用分攤': round(shared_kwh, 2),
-                '總度數': round(total_room_kwh, 2),
-                '應繳金額': charge
+            floor_summaries.append({
+                'floor': floor_label,
+                'bill_amount': floor_amount,
+                'bill_kwh': floor_kwh,
+                'room_kwh': floor_room_kwh,
+                'public_kwh': floor_public_kwh,
+                'unit_price': global_unit_price,
+                'total_charge': floor_total_charge,
+                'difference': floor_total_charge - floor_amount
             })
-        
-        # 記錄樓層摘要
-        floor_summaries.append({
-            'floor': floor_label,
-            'bill_amount': floor_amount,
-            'bill_kwh': floor_kwh,
-            'room_kwh': floor_room_kwh,
-            'public_kwh': public_kwh,
-            'unit_price': unit_price,
-            'total_charge': floor_total_charge,
-            'difference': floor_total_charge - floor_amount
-        })
-    
-    total_charge = sum(r['應繳金額'] for r in results)
     
     return {
         'total_charge': total_charge,
         'taipower_amount': total_amount,
         'difference': total_charge - total_amount,
         'details': results,
-        'floor_summaries': floor_summaries
+        'floor_summaries': floor_summaries,
+        'global_unit_price': global_unit_price,
+        'total_public_kwh': total_public_kwh,
+        'shared_per_room': shared_per_room
     }
 
-# ============== Tab 1: 計費期間 ==============
 
+# ============== Tab 1: 計費期間 ==============
 def render_period_tab(db):
     """計費期間管理"""
     section_header("計費期間管理", "📅")
@@ -260,8 +303,8 @@ def render_period_tab(db):
         with col_info:
             st.info(f"✅ 當前選中: ID {period_id}")
 
-# ============== Tab 2: 計算電費 ==============
 
+# ============== Tab 2: 計算電費 ==============
 def render_calculation_tab(db):
     """計算電費"""
     if 'current_period_id' not in st.session_state:
@@ -274,8 +317,7 @@ def render_calculation_tab(db):
     
     # === 步驟 1: 台電帳單（4 個獨立台電單） ===
     section_header("步驟 1: 輸入台電帳單", "📄")
-    
-    st.caption("💡 提示：每個樓層分別輸入台電單，公用電會自動分攤到該樓層房間")
+    st.caption("💡 提示：輸入各樓層台電單，系統會自動將公用電分攤給 2A~4D")
     
     # 使用 2x2 排列
     row1_col1, row1_col2 = st.columns(2)
@@ -296,19 +338,19 @@ def render_calculation_tab(db):
             st.caption(f"房間：{', '.join(config['rooms'])}")
             
             amount = st.number_input(
-                "金額 (元)", 
-                min_value=0, 
-                value=0, 
-                step=100, 
+                "金額 (元)",
+                min_value=0,
+                value=0,
+                step=100,
                 key=f"{floor_key}_amt",
                 label_visibility="visible"
             )
             
             kwh = st.number_input(
-                "度數", 
-                min_value=0.0, 
-                value=0.0, 
-                step=10.0, 
+                "度數",
+                min_value=0.0,
+                value=0.0,
+                step=10.0,
                 format="%.2f",
                 key=f"{floor_key}_kwh",
                 label_visibility="visible"
@@ -372,7 +414,6 @@ def render_calculation_tab(db):
     
     # === 步驟 2: 房間讀數（智能鎖定版） ===
     section_header("步驟 2: 輸入房間讀數", "🔢")
-    
     st.caption("💡 提示：首次輸入時上期可編輯，之後自動帶入上次讀數並鎖定。")
     
     room_readings = {}
@@ -381,7 +422,6 @@ def render_calculation_tab(db):
     # 按樓層分組顯示
     for floor_key, config in FLOOR_CONFIG.items():
         st.markdown(f"### {config['label']}")
-        
         floor_rooms = config['rooms']
         cols = st.columns(len(floor_rooms))
         
@@ -447,8 +487,8 @@ def render_calculation_tab(db):
                     'previous': previous,
                     'current': current
                 }
-        
-        st.divider()
+    
+    st.divider()
     
     # 儲存讀數
     if st.button("💾 儲存讀數", type="primary"):
@@ -497,11 +537,31 @@ def render_calculation_tab(db):
             st.error("❌ 計算失敗")
             return
         
+        # 顯示關鍵資訊
+        st.markdown("### 📊 計算摘要")
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("總公用電", f"{result['total_public_kwh']:.1f} 度")
+        
+        with col2:
+            st.metric("分攤房間數", "10 間")
+        
+        with col3:
+            st.metric("每間分攤", f"{result['shared_per_room']:.2f} 度")
+        
+        with col4:
+            st.metric("全域單價", f"${result['global_unit_price']:.2f}/度")
+        
+        st.divider()
+        
         # 顯示樓層摘要
         st.markdown("### 📊 各樓層摘要")
-        
         for floor_summary in result['floor_summaries']:
-            with st.expander(f"**{floor_summary['floor']}** - 台電: ${floor_summary['bill_amount']:,} | 收費: ${floor_summary['total_charge']:,}", expanded=True):
+            with st.expander(
+                f"**{floor_summary['floor']}** - 台電: ${floor_summary['bill_amount']:,} | 收費: ${floor_summary['total_charge']:,}",
+                expanded=True
+            ):
                 col1, col2, col3, col4 = st.columns(4)
                 
                 with col1:
@@ -514,20 +574,17 @@ def render_calculation_tab(db):
                     st.metric("公用電", f"{floor_summary['public_kwh']:.0f} 度")
                 
                 with col4:
-                    st.metric("單價", f"${floor_summary['unit_price']:.2f}/度")
-                
-                st.caption(f"收費差異: ${floor_summary['difference']:+,.0f}")
+                    st.metric("收費差異", f"${floor_summary['difference']:+,.0f}")
         
         st.divider()
         
         # 顯示總計
         st.markdown(f"""
 ### 💰 總計
-
 - **台電總金額**: ${result['taipower_amount']:,} 元
 - **收費總金額**: ${result['total_charge']:,} 元
 - **差異**: ${result['difference']:+,.0f} 元
-""")
+        """)
         
         st.divider()
         
@@ -545,11 +602,11 @@ def render_calculation_tab(db):
         details_df = pd.DataFrame(enriched_details)
         
         # 重新排序欄位
-        column_order = ['樓層', '房號', '類型', 'previous_reading', 'current_reading', 
-                       '使用度數', '公用分攤', '總度數', '應繳金額']
+        column_order = ['樓層', '房號', '類型', 'previous_reading', 'current_reading',
+                        '使用度數', '公用分攤', '總度數', '應繳金額']
         details_df = details_df[column_order]
-        details_df.columns = ['樓層', '房號', '類型', '上期讀數', '本期讀數', 
-                             '使用度數', '公用分攤', '總度數', '應繳金額']
+        details_df.columns = ['樓層', '房號', '類型', '上期讀數', '本期讀數',
+                              '使用度數', '公用分攤', '總度數', '應繳金額']
         
         data_table(details_df, key="calc_details")
         
@@ -572,8 +629,8 @@ def render_calculation_tab(db):
             "text/csv"
         )
 
-# ============== Tab 3: 繳費記錄 ==============
 
+# ============== Tab 3: 繳費記錄 ==============
 def render_records_tab(db):
     """繳費記錄"""
     section_header("繳費記錄", "📜")
@@ -593,7 +650,6 @@ def render_records_tab(db):
     
     # 顯示統計
     summary = db.get_electricity_payment_summary(period_id)
-    
     if summary:
         col1, col2, col3 = st.columns(3)
         
@@ -642,8 +698,8 @@ def render_records_tab(db):
     else:
         st.success("✅ 全部已繳清")
 
-# ============== 主函數 ==============
 
+# ============== 主函數 ==============
 def render(db):
     """主渲染函數"""
     st.title("⚡ 電費管理")
