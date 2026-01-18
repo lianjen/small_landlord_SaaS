@@ -1,6 +1,7 @@
 """
-電費管理 - v2.1 完整版
+電費管理 - v2.2 完整版
 支援 1F / 2F / 3F / 4F 分開計算
+修復：上期讀數鎖定、本期預設值正確
 """
 
 import streamlit as st
@@ -369,10 +370,10 @@ def render_calculation_tab(db):
     
     st.divider()
     
-    # === 步驟 2: 房間讀數（上期 → 本期） ===
+    # === 步驟 2: 房間讀數（上期 → 本期）【修復版】 ===
     section_header("步驟 2: 輸入房間讀數", "🔢")
     
-    st.caption("💡 提示：本期讀數必須大於或等於上期讀數。系統會自動帶入上次的本期值作為本次的上期。")
+    st.caption("💡 提示：上期讀數自動帶入（不可修改），本期讀數必須大於或等於上期。")
     
     room_readings = {}
     raw_readings = {}
@@ -388,38 +389,46 @@ def render_calculation_tab(db):
             with col:
                 st.markdown(f"**{room}**")
                 
-                # 取得上次讀數
+                # 🔍 取得上次讀數（作為本次的上期）
                 last_reading = db.get_latest_meter_reading(room, period_id)
-                if last_reading is None:
-                    last_reading = 0.0
+                previous_value = float(last_reading) if last_reading is not None else 0.0
                 
-                previous = st.number_input(
+                # 上期讀數（唯讀顯示）
+                st.number_input(
                     "上期 📊",
                     min_value=0.0,
-                    value=float(last_reading),
+                    value=previous_value,
                     step=1.0,
                     key=f"prev_{room}",
-                    help="上次抄表的讀數"
+                    help="上次抄表的讀數（自動帶入）",
+                    disabled=True  # 🔧 鎖定不可編輯
                 )
                 
+                # 本期讀數（可編輯，預設 = 上期）
                 current = st.number_input(
                     "本期 📈",
-                    min_value=previous,
-                    value=float(last_reading),
+                    min_value=previous_value,
+                    value=previous_value,  # 🔧 關鍵修改：確保 value >= min_value
                     step=1.0,
                     key=f"curr_{room}",
                     help="本次抄表的讀數"
                 )
                 
-                usage = current - previous
-                if usage > 0:
-                    st.success(f"⚡ {usage:.1f} 度")
-                elif usage == 0 and current > 0:
-                    st.info("📊 無變化")
+                # 計算用電度數
+                usage = current - previous_value
                 
+                # 顯示狀態
+                if usage > 0:
+                    st.success(f"⚡ 用電 {usage:.1f} 度")
+                elif usage == 0 and current > 0:
+                    st.info("📊 讀數無變化")
+                else:
+                    st.caption("⚪ 等待輸入")
+                
+                # 儲存數據
                 room_readings[room] = usage
                 raw_readings[room] = {
-                    'previous': previous,
+                    'previous': previous_value,
                     'current': current
                 }
         
@@ -591,7 +600,7 @@ def render_records_tab(db):
     st.divider()
     section_header("快速標記", "⚡", divider=False)
     
-    unpaid_df = df[df['payment_status'] == '未繳']
+    unpaid_df = df[df['payment_status'] == 'unpaid']
     
     if not unpaid_df.empty:
         for idx, row in unpaid_df.iterrows():
@@ -605,9 +614,9 @@ def render_records_tab(db):
                     ok, msg = db.update_electricity_payment(
                         period_id,
                         row['room_number'],
-                        '已繳',
+                        'paid',
                         row['amount_due'],
-                        date.today()
+                        date.today().isoformat()
                     )
                     if ok:
                         st.success("✅")
