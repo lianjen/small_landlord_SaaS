@@ -1,348 +1,270 @@
+# views/tracking.py (完整版 - 含房號篩選功能)
 """
-繳費追蹤 - 英文狀態版
+繳費追蹤頁面
+職責：追蹤租金繳費狀態，支援房號篩選與快速標記
 """
 import streamlit as st
+from datetime import datetime, date
+from services.payment_service import PaymentService
+from services.logger import logger
+from repository.tenant_repository import TenantRepository
 import pandas as pd
-from datetime import date, datetime, timedelta
-import logging
-
-# 安全 import
-try:
-    from components.cards import section_header, metric_card, empty_state, data_table, info_card
-except ImportError:
-    def section_header(title, icon="", divider=True):
-        st.markdown(f"### {icon} {title}")
-        if divider: st.divider()
-    
-    def metric_card(label, value, delta="", icon="", color="normal"):
-        st.metric(label, value, delta)
-    
-    def empty_state(msg, icon="", desc=""):
-        st.info(f"{icon} {msg}")
-    
-    def data_table(df, key="table"):
-        st.dataframe(df, use_container_width=True, key=key)
-    
-    def info_card(title, content, icon="", type="info"):
-        st.info(f"{icon} {title}: {content}")
-
-try:
-    from config.constants import ROOMS
-except ImportError:
-    class ROOMS:
-        ALL_ROOMS = ["1A", "1B", "2A", "2B", "3A", "3B", "3C", "3D", "4A", "4B", "4C", "4D"]
-
-logger = logging.getLogger(__name__)
-
-# 狀態對應（英文 -> 中文顯示）
-STATUS_MAP = {
-    'unpaid': '未繳',
-    'paid': '已繳',
-    'overdue': '逾期'
-}
-
-def get_overdue_days(due_date) -> int:
-    """計算逾期天數"""
-    if pd.isna(due_date):
-        return 0
-    
-    try:
-        if isinstance(due_date, str):
-            due_date = datetime.strptime(due_date, "%Y-%m-%d").date()
-        elif isinstance(due_date, datetime):
-            due_date = due_date.date()
-        
-        today = date.today()
-        delta = (today - due_date).days
-        return max(0, delta)
-    except:
-        return 0
-
-
-def categorize_payment_status(row) -> str:
-    """分類繳費狀態"""
-    status = row.get('status', '')
-    
-    if status == 'paid':
-        return '已繳'
-    
-    overdue_days = get_overdue_days(row.get('due_date'))
-    
-    if overdue_days > 7:
-        return '逾期未繳'
-    elif overdue_days > 0:
-        return '即將逾期'
-    else:
-        return '未到期'
-
 
 def render(db):
-    """主渲染函數"""
+    """主入口函式（供 main.py 動態載入使用）"""
+    render_tracking_page()
+
+def render_tracking_page():
+    """渲染繳費追蹤頁面"""
     st.title("📋 繳費追蹤")
     
-    # === 篩選區域 ===
-    section_header("篩選條件", "🔍")
+    service = PaymentService()
+    
+    # === 快速篩選按鈕 ===
+    st.subheader("🔍 快速篩選")
     
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        filter_year = st.selectbox(
-            "年份",
-            [None] + list(range(2020, 2031)),
-            format_func=lambda x: "全部" if x is None else str(x),
-            index=date.today().year - 2020 + 1 if date.today().year >= 2020 else 0,
-            key="track_year"
-        )
+        if st.button("🚨 逾期未繳", use_container_width=True, type="primary"):
+            st.session_state.tracking_filter = "overdue"
+            st.rerun()
     
     with col2:
-        filter_month = st.selectbox(
-            "月份",
-            [None] + list(range(1, 13)),
-            format_func=lambda x: "全部" if x is None else str(x),
-            key="track_month"
-        )
+        if st.button("⚠️ 即將到期", use_container_width=True):
+            st.session_state.tracking_filter = "upcoming"
+            st.rerun()
     
     with col3:
-        # 使用中文顯示，但查詢用英文
-        filter_status_display = st.selectbox(
-            "狀態",
-            [None, "未繳", "已繳", "逾期"],
-            format_func=lambda x: "全部" if x is None else x,
-            key="track_status"
-        )
-        
-        # 轉換為英文查詢
-        status_reverse_map = {'未繳': 'unpaid', '已繳': 'paid', '逾期': 'overdue'}
-        filter_status = status_reverse_map.get(filter_status_display) if filter_status_display else None
+        if st.button("⏳ 全部未繳", use_container_width=True):
+            st.session_state.tracking_filter = "unpaid"
+            st.rerun()
     
     with col4:
-        filter_rooms = st.multiselect(
-            "房號",
-            ROOMS.ALL_ROOMS,
-            key="track_rooms"
-        )
+        if st.button("🔄 重置", use_container_width=True):
+            st.session_state.tracking_filter = "all"
+            st.rerun()
+    
+    # 取得當前篩選狀態
+    if 'tracking_filter' not in st.session_state:
+        st.session_state.tracking_filter = "all"
+    
+    current_filter = st.session_state.tracking_filter
     
     st.divider()
     
-    # === 查詢資料 ===
+    # === 房號篩選 ===
     try:
-        df = db.get_payment_schedule(
-            year=filter_year,
-            month=filter_month,
-            status=filter_status
+        tenant_repo = TenantRepository()
+        tenants = tenant_repo.get_active_tenants()
+        room_list = sorted(set([t['room_number'] for t in tenants]))
+        
+        # 支援多房號選擇
+        selected_rooms = st.multiselect(
+            "🏠 房號篩選（可多選）",
+            options=room_list,
+            default=[],
+            help="選擇一個或多個房間，留空則顯示全部"
         )
     except Exception as e:
-        st.error(f"❌ 查詢失敗: {e}")
-        logger.error(f"查詢失敗: {e}", exc_info=True)
-        return
+        st.error(f"❌ 載入房間列表失敗: {str(e)}")
+        selected_rooms = []
     
-    if df.empty:
-        empty_state("沒有符合條件的記錄", "📭")
-        return
-    
-    # 應用房號篩選
-    if filter_rooms and 'room_number' in df.columns:
-        df = df[df['room_number'].isin(filter_rooms)]
-    
-    # 計算逾期天數
-    df['逾期天數'] = df.apply(lambda row: get_overdue_days(row.get('due_date')), axis=1)
-    
-    # 分類狀態
-    df['狀態分類'] = df.apply(categorize_payment_status, axis=1)
-    
-    if df.empty:
-        empty_state("沒有符合條件的記錄", "📭")
-        return
-    
-    # === 統計卡片 ===
-    section_header("統計概覽", "📊")
-    
-    total_count = len(df)
-    unpaid_df = df[df['status'] == 'unpaid'] if 'status' in df.columns else pd.DataFrame()
-    paid_df = df[df['status'] == 'paid'] if 'status' in df.columns else pd.DataFrame()
-    overdue_df = df[(df['status'] == 'unpaid') & (df['逾期天數'] > 0)] if 'status' in df.columns else pd.DataFrame()
-    
-    col_s1, col_s2, col_s3, col_s4, col_s5 = st.columns(5)
-    
-    with col_s1:
-        metric_card("總筆數", str(total_count), icon="📋", color="normal")
-    
-    with col_s2:
-        paid_amount = paid_df['paid_amount'].sum() if 'paid_amount' in paid_df.columns and not paid_df.empty else 0
-        metric_card("已繳", str(len(paid_df)), f"${paid_amount:,.0f}", "✅", "success")
-    
-    with col_s3:
-        unpaid_amount = unpaid_df['amount'].sum() if 'amount' in unpaid_df.columns and not unpaid_df.empty else 0
-        metric_card("未繳", str(len(unpaid_df)), f"${unpaid_amount:,.0f}", "⏳", "warning")
-    
-    with col_s4:
-        overdue_amount = overdue_df['amount'].sum() if 'amount' in overdue_df.columns and not overdue_df.empty else 0
-        metric_card("逾期", str(len(overdue_df)), f"${overdue_amount:,.0f}", "🚨", "error")
-    
-    with col_s5:
-        payment_rate = (len(paid_df) / total_count * 100) if total_count > 0 else 0
-        metric_card("收款率", f"{payment_rate:.1f}%", icon="📊", color="normal")
-    
-    st.divider()
-    
-    # === 逾期警示 ===
-    if not overdue_df.empty:
-        st.error(f"🚨 **逾期警示**: {len(overdue_df)} 筆未繳且已逾期")
+    # === 載入資料 ===
+    try:
+        # 根據篩選條件載入
+        if current_filter == "overdue":
+            payments = service.get_overdue_payments()
+            st.info(f"📊 顯示：逾期未繳（共 {len(payments)} 筆）")
         
-        with st.expander("查看逾期明細", expanded=True):
-            for _, row in overdue_df.head(5).iterrows():
-                room = row.get('room_number', 'N/A')
-                tenant = row.get('tenant_name', 'N/A')
-                year = row.get('payment_year', 'N/A')
-                month = row.get('payment_month', 'N/A')
-                amount = row.get('amount', 0)
-                days = row.get('逾期天數', 0)
+        elif current_filter == "upcoming":
+            # 即將到期：未來 3 天內到期
+            all_unpaid = service.get_unpaid_payments()
+            today = date.today()
+            payments = []
+            
+            for p in all_unpaid:
+                due_date = pd.to_datetime(p['due_date']).date()
+                days_until_due = (due_date - today).days
                 
-                st.write(f"**{room}** {tenant} | {year}/{month} | ${amount:,} | 逾期 {days} 天")
+                if 0 <= days_until_due <= 3:
+                    payments.append(p)
             
-            if len(overdue_df) > 5:
-                st.caption(f"... 還有 {len(overdue_df) - 5} 筆")
+            st.info(f"📊 顯示：3 天內到期（共 {len(payments)} 筆）")
         
-        st.divider()
-    
-    # === 批量操作 ===
-    if not unpaid_df.empty:
-        section_header("批量操作", "⚡")
+        elif current_filter == "unpaid":
+            payments = service.get_unpaid_payments()
+            st.info(f"📊 顯示：全部未繳（共 {len(payments)} 筆）")
         
-        # 快速篩選按鈕
-        col_q1, col_q2, col_q3, col_q4 = st.columns(4)
+        else:
+            payments = service.payment_repo.get_all_payments()
+            st.info(f"📊 顯示：全部記錄（共 {len(payments)} 筆）")
         
-        with col_q1:
-            if st.button("🔴 選擇所有逾期"):
-                st.session_state.selected_tracking = overdue_df['id'].tolist() if 'id' in overdue_df.columns else []
-                st.rerun()
+        # 根據房號篩選
+        if selected_rooms:
+            payments = [p for p in payments if p['room_number'] in selected_rooms]
+            st.caption(f"🔎 已篩選房號：{', '.join(selected_rooms)}")
         
-        with col_q2:
-            if st.button("🟡 選擇即將逾期"):
-                soon_overdue = df[df['狀態分類'] == '即將逾期']['id'].tolist() if 'id' in df.columns else []
-                st.session_state.selected_tracking = soon_overdue
-                st.rerun()
+        if not payments:
+            st.success("✅ 沒有符合條件的記錄")
+            return
         
-        with col_q3:
-            if st.button("🟢 選擇全部未繳"):
-                st.session_state.selected_tracking = unpaid_df['id'].tolist() if 'id' in unpaid_df.columns else []
-                st.rerun()
+        # === 轉換為 DataFrame ===
+        df = pd.DataFrame(payments)
         
-        with col_q4:
-            if st.button("🔄 清除選擇"):
-                st.session_state.selected_tracking = []
-                st.rerun()
+        # 計算逾期天數
+        today = pd.Timestamp.now().normalize()
+        df['due_date_dt'] = pd.to_datetime(df['due_date'])
+        df['days_overdue'] = (today - df['due_date_dt']).dt.days
+        df['days_overdue'] = df['days_overdue'].apply(lambda x: max(0, x))
         
-        # 手動選擇
-        if 'selected_tracking' not in st.session_state:
-            st.session_state.selected_tracking = []
+        # 格式化日期
+        df['due_date'] = df['due_date_dt'].dt.strftime('%Y-%m-%d')
         
-        if 'id' in unpaid_df.columns:
-            selected_ids = st.multiselect(
-                "或手動選擇要標記的項目",
-                unpaid_df['id'].tolist(),
-                default=st.session_state.selected_tracking,
-                format_func=lambda x: f"{unpaid_df[unpaid_df['id']==x]['room_number'].values[0] if 'room_number' in unpaid_df.columns else 'N/A'} - {unpaid_df[unpaid_df['id']==x]['payment_year'].values[0] if 'payment_year' in unpaid_df.columns else 'N/A'}/{unpaid_df[unpaid_df['id']==x]['payment_month'].values[0] if 'payment_month' in unpaid_df.columns else 'N/A'} (${unpaid_df[unpaid_df['id']==x]['amount'].values[0] if 'amount' in unpaid_df.columns else 0:,.0f})",
-                key="manual_select"
-            )
-            
-            st.session_state.selected_tracking = selected_ids
-            
-            if st.button(f"✅ 標記已繳 ({len(selected_ids)})", type="primary", disabled=len(selected_ids) == 0):
-                try:
-                    success, fail = db.batch_mark_paid(selected_ids)
-                    
-                    if success > 0:
-                        st.success(f"✅ 成功標記 {success} 筆")
-                        st.session_state.selected_tracking = []
-                        st.rerun()
-                    
-                    if fail > 0:
-                        st.error(f"❌ 失敗 {fail} 筆")
-                
-                except Exception as e:
-                    st.error(f"❌ 批量標記失敗: {e}")
-                    logger.error(f"批量標記失敗: {e}", exc_info=True)
+        # 狀態顯示
+        status_map = {'unpaid': '⏳ 未繳', 'paid': '✅ 已繳', 'overdue': '🚨 逾期'}
+        df['status_display'] = df['status'].map(status_map).fillna(df['status'])
         
-        st.divider()
-    
-    # === 資料表格 ===
-    section_header("詳細列表", "📋")
-    st.write(f"共 {len(df)} 筆記錄")
-    
-    # 格式化顯示
-    display_df = df.copy()
-    
-    # 安全處理欄位
-    if 'payment_year' in display_df.columns and 'payment_month' in display_df.columns:
-        display_df['期間'] = display_df.apply(
-            lambda x: f"{x['payment_year']}/{x['payment_month']}", axis=1
+        # 添加逾期標記
+        df['overdue_display'] = df.apply(
+            lambda row: f"🚨 逾期 {row['days_overdue']} 天" if row['days_overdue'] > 0 else "-",
+            axis=1
         )
-    
-    if 'amount' in display_df.columns:
-        display_df['應收金額'] = display_df['amount'].apply(lambda x: f"${x:,.0f}")
-    
-    if 'paid_amount' in display_df.columns:
-        display_df['實收金額'] = display_df['paid_amount'].apply(lambda x: f"${x:,.0f}" if pd.notna(x) else "$0")
-    
-    # 狀態標記（英文轉中文顯示）
-    def status_with_icon(row):
-        status = row.get('status', 'N/A')
-        overdue = row.get('逾期天數', 0)
         
-        if status == 'paid':
-            return '✅ 已繳'
-        elif overdue > 7:
-            return f'🚨 逾期 {overdue} 天'
-        elif overdue > 0:
-            return f'🟡 逾期 {overdue} 天'
-        else:
-            return '⏳ 未繳'
+        # === 統計摘要 ===
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            total_unpaid = len(df[df['status'] == 'unpaid'])
+            st.metric("待繳款", f"{total_unpaid} 筆")
+        
+        with col2:
+            total_overdue = len(df[df['days_overdue'] > 0])
+            st.metric("逾期", f"{total_overdue} 筆", delta="-" if total_overdue > 0 else "正常", delta_color="inverse")
+        
+        with col3:
+            total_amount = df[df['status'] == 'unpaid']['amount'].sum()
+            st.metric("待收金額", f"${total_amount:,.0f}")
+        
+        with col4:
+            overdue_amount = df[df['days_overdue'] > 0]['amount'].sum()
+            st.metric("逾期金額", f"${overdue_amount:,.0f}")
+        
+        st.divider()
+        
+        # === 顯示表格 ===
+        st.subheader("📋 詳細列表")
+        
+        # 排序：逾期天數 > 到期日
+        df_sorted = df.sort_values(['days_overdue', 'due_date_dt'], ascending=[False, True])
+        
+        st.dataframe(
+            df_sorted[[
+                'room_number', 'tenant_name', 'payment_year', 'payment_month',
+                'amount', 'due_date', 'overdue_display', 'status_display'
+            ]].rename(columns={
+                'room_number': '房號',
+                'tenant_name': '房客',
+                'payment_year': '年份',
+                'payment_month': '月份',
+                'amount': '金額',
+                'due_date': '到期日',
+                'overdue_display': '逾期狀態',
+                'status_display': '繳款狀態'
+            }),
+            use_container_width=True,
+            hide_index=True
+        )
+        
+        # === 批量標記功能 ===
+        unpaid_df = df[df['status'] == 'unpaid']
+        
+        if not unpaid_df.empty:
+            st.divider()
+            st.subheader("✅ 批量標記已繳")
+            
+            col1, col2, col3 = st.columns([4, 2, 2])
+            
+            with col1:
+                # 初始化 session state
+                if 'selected_tracking' not in st.session_state:
+                    st.session_state.selected_tracking = []
+                
+                selected_ids = st.multiselect(
+                    "選擇要標記為已繳的項目（可多選）",
+                    options=unpaid_df['id'].tolist(),
+                    default=st.session_state.selected_tracking,
+                    format_func=lambda x: (
+                        f"{unpaid_df[unpaid_df['id']==x]['room_number'].values[0]} - "
+                        f"{unpaid_df[unpaid_df['id']==x]['tenant_name'].values[0]} "
+                        f"({unpaid_df[unpaid_df['id']==x]['payment_year'].values[0]}/"
+                        f"{unpaid_df[unpaid_df['id']==x]['payment_month'].values[0]:02d}) "
+                        f"${unpaid_df[unpaid_df['id']==x]['amount'].values[0]:,.0f}"
+                    ),
+                    key="tracking_multiselect"
+                )
+                
+                st.session_state.selected_tracking = selected_ids
+            
+            with col2:
+                paid_amount = st.number_input(
+                    "繳款金額",
+                    min_value=0.0,
+                    step=100.0,
+                    help="留空則使用應繳金額",
+                    key="tracking_paid_amount"
+                )
+            
+            with col3:
+                st.write("")
+                st.write("")
+            
+            # 快速選擇按鈕
+            col_btn1, col_btn2, col_btn3 = st.columns(3)
+            
+            with col_btn1:
+                if st.button("📌 全選", use_container_width=True, key="tracking_select_all"):
+                    st.session_state.selected_tracking = unpaid_df['id'].tolist()
+                    st.rerun()
+            
+            with col_btn2:
+                if st.button("🔄 清除", use_container_width=True, key="tracking_clear"):
+                    st.session_state.selected_tracking = []
+                    st.rerun()
+            
+            # 標記按鈕
+            with col_btn3:
+                if st.button(
+                    f"✅ 標記 ({len(selected_ids)})",
+                    type="primary",
+                    disabled=len(selected_ids) == 0,
+                    use_container_width=True,
+                    key="tracking_mark_paid"
+                ):
+                    with st.spinner("處理中..."):
+                        try:
+                            results = service.batch_mark_paid(
+                                selected_ids,
+                                paid_amount if paid_amount > 0 else None
+                            )
+                            
+                            if results['success'] > 0:
+                                st.success(f"✅ 成功標記 {results['success']} 筆")
+                                st.session_state.selected_tracking = []
+                                st.rerun()
+                            
+                            if results['failed'] > 0:
+                                st.error(f"❌ 失敗 {results['failed']} 筆")
+                        except Exception as e:
+                            st.error(f"❌ 標記失敗: {str(e)}")
+                            logger.error(f"批量標記失敗: {str(e)}", exc_info=True)
     
-    display_df['狀態標記'] = display_df.apply(status_with_icon, axis=1)
-    
-    # 到期日格式化
-    if 'due_date' in display_df.columns:
-        display_df['到期日'] = pd.to_datetime(display_df['due_date'], errors='coerce').dt.strftime('%Y-%m-%d')
-    
-    # 選擇要顯示的欄位（動態檢查）
-    available_cols = display_df.columns.tolist()
-    preferred_cols = ['id', 'room_number', 'tenant_name', '期間', '應收金額', '實收金額', 'payment_method', '到期日', '狀態標記']
-    cols_to_show = [col for col in preferred_cols if col in available_cols]
-    
-    rename_cols = {
-        'room_number': '房號',
-        'tenant_name': '房客',
-        'payment_method': '繳款方式'
-    }
-    
-    display_df = display_df.rename(columns=rename_cols)
-    
-    # 更新 cols_to_show 以反映重命名
-    final_cols = []
-    for col in cols_to_show:
-        if col in rename_cols:
-            final_cols.append(rename_cols[col])
-        else:
-            final_cols.append(col)
-    
-    # 確保所有欄位都存在
-    final_cols = [col for col in final_cols if col in display_df.columns]
-    
-    # 顯示表格
-    if final_cols:
-        st.dataframe(display_df[final_cols], use_container_width=True, hide_index=True, key="tracking_table")
-    else:
-        st.warning("⚠️ 無法顯示資料表格，請檢查資料格式")
-    
-    # 匯出功能
-    st.divider()
-    section_header("匯出資料", "📥", divider=False)
-    
-    csv = df.to_csv(index=False, encoding='utf-8-sig')
-    st.download_button(
-        "📥 下載 CSV",
-        csv,
-        f"tracking_{datetime.now().strftime('%Y%m%d')}.csv",
-        "text/csv"
-    )
+    except Exception as e:
+        st.error(f"❌ 載入資料失敗: {str(e)}")
+        logger.error(f"追蹤頁面錯誤: {str(e)}", exc_info=True)
+
+# ============================================
+# 本機測試入口
+# ============================================
+if __name__ == "__main__":
+    render_tracking_page()
