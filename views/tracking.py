@@ -26,7 +26,7 @@ def render_tracking_page():
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        if st.button("🚨 逾期未繳", use_container_width=True, type="primary"):
+        if st.button("🚨 逾期未繳", width="stretch", type="primary"):
             st.session_state.tracking_filter = "overdue"
             st.rerun()
     
