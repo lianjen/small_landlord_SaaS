@@ -1,6 +1,6 @@
 """
-電費管理 - 簡化穩定版
-完全使用 db 現有方法,無子模組依賴
+電費管理 - 完整版 v2.0
+支援上期/本期讀數輸入與自動記憶
 """
 
 import streamlit as st
@@ -48,11 +48,9 @@ def calculate_electricity_charges(
 ) -> Dict:
     """
     計算電費
-    
     Args:
         taipower_bills: [{'floor_label', 'amount', 'kwh'}, ...]
         room_readings: {'房號': 度數, ...}
-    
     Returns:
         計費結果字典
     """
@@ -84,7 +82,6 @@ def calculate_electricity_charges(
     for room, kwh in room_readings.items():
         is_sharing = room in ROOMS.SHARING_ROOMS
         room_type = "分攤房間" if is_sharing else "獨立房間"
-        
         shared_kwh = shared_per_room if is_sharing else 0
         total_room_kwh = kwh + shared_kwh
         charge = round(total_room_kwh * unit_price)
@@ -109,7 +106,6 @@ def calculate_electricity_charges(
         'difference': total_charge - total_amount,
         'details': results
     }
-
 
 # ============== Tab 1: 計費期間 ==============
 
@@ -164,7 +160,6 @@ def render_period_tab(db):
     
     # 顯示期間列表
     section_header("現有期間", "📋", divider=False)
-    
     periods = db.get_all_periods()
     
     if not periods:
@@ -208,20 +203,16 @@ def render_period_tab(db):
         with col_info:
             st.info(f"✅ 當前選中: ID {period_id}")
 
-
 # ============== Tab 2: 計算電費 ==============
 
 def render_calculation_tab(db):
     """計算電費"""
-    
     if 'current_period_id' not in st.session_state:
         info_card("請先選擇期間", "請前往「計費期間」Tab 選擇一個期間", "⚠️", "warning")
         return
     
     period_id = st.session_state.current_period_id
-    
     st.info(f"📅 當前期間 ID: {period_id}")
-    
     st.divider()
     
     # === 步驟 1: 台電帳單 ===
@@ -265,31 +256,83 @@ def render_calculation_tab(db):
     
     st.divider()
     
-    # === 步驟 2: 房間讀數 ===
+    # === 步驟 2: 房間讀數（改良版：上期 → 本期） ===
     section_header("步驟 2: 輸入房間讀數", "🔢")
     
-    # 分 4 列顯示
+    st.caption("💡 提示：本期讀數必須大於或等於上期讀數。系統會自動帶入上次的本期值作為本次的上期。")
+    
+    # 用於儲存讀數
     room_readings = {}
+    raw_readings = {}  # 儲存原始讀數（供下次使用）
+    
+    # 分 4 列顯示 (每列 3 個房間)
     rows = [ROOMS.ALL_ROOMS[i:i+3] for i in range(0, len(ROOMS.ALL_ROOMS), 3)]
     
     for row_rooms in rows:
         cols = st.columns(3)
         for col, room in zip(cols, row_rooms):
             with col:
-                reading = st.number_input(
-                    f"**{room}**",
+                st.markdown(f"**{room}**")
+                
+                # 🔍 取得上次的讀數
+                last_reading = db.get_latest_meter_reading(room, period_id)
+                if last_reading is None:
+                    last_reading = 0.0
+                
+                # 輸入上期與本期
+                previous = st.number_input(
+                    "上期讀數 📊",
                     min_value=0.0,
-                    value=0.0,
-                    step=10.0,
-                    key=f"reading_{room}"
+                    value=float(last_reading),
+                    step=1.0,
+                    key=f"prev_{room}",
+                    help="上次抄表的讀數"
                 )
-                room_readings[room] = reading
+                
+                current = st.number_input(
+                    "本期讀數 📈",
+                    min_value=previous,  # 強制 >= 上期
+                    value=float(last_reading),
+                    step=1.0,
+                    key=f"curr_{room}",
+                    help="本次抄表的讀數"
+                )
+                
+                # 顯示差值
+                usage = current - previous
+                if usage > 0:
+                    st.success(f"⚡ 用電: **{usage:.1f}** 度")
+                elif usage == 0 and current > 0:
+                    st.info(f"📊 無變化")
+                
+                # 儲存計算結果
+                room_readings[room] = usage
+                raw_readings[room] = {
+                    'previous': previous,
+                    'current': current
+                }
     
-    if st.button("💾 儲存讀數"):
+    # 儲存按鈕
+    if st.button("💾 儲存讀數", type="primary"):
         if 'room_readings' not in st.session_state:
             st.session_state.room_readings = {}
+        if 'raw_readings' not in st.session_state:
+            st.session_state.raw_readings = {}
+        
         st.session_state.room_readings[period_id] = room_readings
-        st.success("✅ 已儲存")
+        st.session_state.raw_readings[period_id] = raw_readings
+        
+        # 同時儲存到資料庫
+        save_count = 0
+        for room, usage in room_readings.items():
+            raw = raw_readings[room]
+            ok, msg = db.save_electricity_reading(
+                period_id, room, raw['previous'], raw['current'], usage
+            )
+            if ok:
+                save_count += 1
+        
+        st.success(f"✅ 已儲存 {save_count} 筆讀數")
     
     st.divider()
     
@@ -300,6 +343,7 @@ def render_calculation_tab(db):
         # 取得資料
         bills = st.session_state.get('taipower_bills', {}).get(period_id)
         readings = st.session_state.get('room_readings', {}).get(period_id)
+        raw = st.session_state.get('raw_readings', {}).get(period_id)
         
         if not bills:
             st.error("❌ 請先輸入台電帳單")
@@ -334,13 +378,31 @@ def render_calculation_tab(db):
         # 顯示明細
         st.divider()
         st.write("**各房間明細**")
-        details_df = pd.DataFrame(result['details'])
+        
+        # 加入原始讀數到明細
+        enriched_details = []
+        for detail in result['details']:
+            room = detail['房號']
+            detail['previous_reading'] = raw[room]['previous']
+            detail['current_reading'] = raw[room]['current']
+            enriched_details.append(detail)
+        
+        details_df = pd.DataFrame(enriched_details)
+        
+        # 重新排序欄位
+        column_order = ['房號', '類型', 'previous_reading', 'current_reading', 
+                       '使用度數', '公用分攤', '總度數', '應繳金額']
+        details_df = details_df[column_order]
+        details_df.columns = ['房號', '類型', '上期讀數', '本期讀數', 
+                             '使用度數', '公用分攤', '總度數', '應繳金額']
+        
         data_table(details_df, key="calc_details")
         
         # 儲存結果
         st.divider()
         if st.button("💾 儲存計費結果"):
-            ok, msg = db.save_electricity_record(period_id, result['details'])
+            # 傳遞完整的明細（含原始讀數）
+            ok, msg = db.save_electricity_record(period_id, enriched_details)
             if ok:
                 st.success(msg)
                 st.balloons()
@@ -355,7 +417,6 @@ def render_calculation_tab(db):
             f"electricity_{period_id}.csv",
             "text/csv"
         )
-
 
 # ============== Tab 3: 繳費記錄 ==============
 
@@ -426,7 +487,6 @@ def render_records_tab(db):
                         st.error(msg)
     else:
         st.success("✅ 全部已繳清")
-
 
 # ============== 主函數 ==============
 
