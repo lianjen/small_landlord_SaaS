@@ -1,7 +1,7 @@
 """
-電費管理 - v2.2 完整版
+電費管理 - v2.3 完整版
 支援 1F / 2F / 3F / 4F 分開計算
-修復：上期讀數鎖定、本期預設值正確
+修復：首次輸入可編輯上期，第二次後自動鎖定
 """
 
 import streamlit as st
@@ -370,10 +370,10 @@ def render_calculation_tab(db):
     
     st.divider()
     
-    # === 步驟 2: 房間讀數（上期 → 本期）【修復版】 ===
+    # === 步驟 2: 房間讀數（智能鎖定版） ===
     section_header("步驟 2: 輸入房間讀數", "🔢")
     
-    st.caption("💡 提示：上期讀數自動帶入（不可修改），本期讀數必須大於或等於上期。")
+    st.caption("💡 提示：首次輸入時上期可編輯，之後自動帶入上次讀數並鎖定。")
     
     room_readings = {}
     raw_readings = {}
@@ -391,31 +391,47 @@ def render_calculation_tab(db):
                 
                 # 🔍 取得上次讀數（作為本次的上期）
                 last_reading = db.get_latest_meter_reading(room, period_id)
-                previous_value = float(last_reading) if last_reading is not None else 0.0
                 
-                # 上期讀數（唯讀顯示）
-                st.number_input(
-                    "上期 📊",
-                    min_value=0.0,
-                    value=previous_value,
-                    step=1.0,
-                    key=f"prev_{room}",
-                    help="上次抄表的讀數（自動帶入）",
-                    disabled=True  # 🔧 鎖定不可編輯
-                )
+                # 🎯 判斷是否為首次輸入
+                is_first_time = (last_reading is None or last_reading == 0)
                 
-                # 本期讀數（可編輯，預設 = 上期）
+                if is_first_time:
+                    # 🆕 首次輸入：上期可編輯
+                    previous = st.number_input(
+                        "上期 📊",
+                        min_value=0.0,
+                        value=0.0,
+                        step=1.0,
+                        key=f"prev_{room}",
+                        help="首次輸入，請輸入起始讀數",
+                        disabled=False  # ✅ 可編輯
+                    )
+                else:
+                    # 🔒 非首次：上期鎖定
+                    previous_value = float(last_reading)
+                    st.number_input(
+                        "上期 📊",
+                        min_value=0.0,
+                        value=previous_value,
+                        step=1.0,
+                        key=f"prev_{room}",
+                        help="自動帶入上次讀數（不可修改）",
+                        disabled=True  # 🔒 鎖定
+                    )
+                    previous = previous_value
+                
+                # 本期讀數（必須 >= 上期）
                 current = st.number_input(
                     "本期 📈",
-                    min_value=previous_value,
-                    value=previous_value,  # 🔧 關鍵修改：確保 value >= min_value
+                    min_value=previous,
+                    value=previous,
                     step=1.0,
                     key=f"curr_{room}",
                     help="本次抄表的讀數"
                 )
                 
                 # 計算用電度數
-                usage = current - previous_value
+                usage = current - previous
                 
                 # 顯示狀態
                 if usage > 0:
@@ -428,7 +444,7 @@ def render_calculation_tab(db):
                 # 儲存數據
                 room_readings[room] = usage
                 raw_readings[room] = {
-                    'previous': previous_value,
+                    'previous': previous,
                     'current': current
                 }
         
