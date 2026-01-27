@@ -1,8 +1,9 @@
 """
-電費管理 - v2.6 最終版
+電費管理 - v2.6 + 加強儲存反饋版
 ✅ 公用分攤四捨五入為整數
 ✅ 移除樓層摘要中的公用電顯示
 ✅ 1F (1A/1B) 完全獨立，2F~4F 合併計算
+✅ 加強儲存反饋和提示訊息
 """
 
 import streamlit as st
@@ -338,6 +339,12 @@ def render_calculation_tab(db):
     
     period_id = st.session_state.current_period_id
     st.info(f"📅 當前期間 ID: {period_id}")
+    
+    # ✅ 顯示是否已有儲存記錄
+    existing_records = db.get_electricity_payment_record(period_id)
+    if existing_records is not None and not existing_records.empty:
+        st.success(f"✅ 此期間已有 {len(existing_records)} 筆儲存記錄，可前往「📜 繳費記錄」Tab 查看")
+    
     st.divider()
     
     # === 步驟 1: 台電帳單 ===
@@ -545,7 +552,7 @@ def render_calculation_tab(db):
             if ok:
                 save_count += 1
         
-        st.success(f"✅ 已儲存 {save_count} 筆讀數")
+        st.success(f"✅ 已儲存 {save_count} 筆讀數到資料庫")
     
     st.divider()
     
@@ -642,24 +649,44 @@ def render_calculation_tab(db):
         
         data_table(details_df, key="calc_details")
         
-        # 儲存結果
+        # ✅ 加強儲存反饋
         st.divider()
-        if st.button("💾 儲存計費結果", type="primary"):
-            ok, msg = db.save_electricity_record(period_id, enriched_details)
-            if ok:
-                st.success(msg)
-                st.balloons()
-            else:
-                st.error(msg)
         
-        # 匯出
-        csv = details_df.to_csv(index=False, encoding='utf-8-sig')
-        st.download_button(
-            "📥 下載 CSV",
-            csv,
-            f"electricity_{period_id}.csv",
-            "text/csv"
-        )
+        col_save, col_download = st.columns([1, 1])
+        
+        with col_save:
+            if st.button("💾 儲存計費結果到資料庫", type="primary", use_container_width=True):
+                try:
+                    ok, msg = db.save_electricity_record(period_id, enriched_details)
+                    
+                    if ok:
+                        st.success("✅ " + msg)
+                        st.info(f"📍 儲存位置：資料庫 electricity_records 表 (period_id: {period_id})")
+                        st.balloons()
+                        
+                        # 顯示下一步提示
+                        st.markdown("""
+                        **✨ 下一步：**
+                        - 前往「📜 繳費記錄」Tab 查看已儲存的計費記錄
+                        - 可以在那裡快速標記繳費狀態
+                        """)
+                    else:
+                        st.error(f"❌ 儲存失敗：{msg}")
+                        logger.error(f"Save failed: {msg}")
+                
+                except Exception as e:
+                    st.error(f"❌ 儲存時發生錯誤：{str(e)}")
+                    logger.exception("Exception during save")
+        
+        with col_download:
+            csv = details_df.to_csv(index=False, encoding='utf-8-sig')
+            st.download_button(
+                "📥 下載 CSV 備份",
+                csv,
+                f"electricity_{period_id}.csv",
+                "text/csv",
+                use_container_width=True
+            )
 
 
 # ============== Tab 3: 繳費記錄 ==============
@@ -673,11 +700,21 @@ def render_records_tab(db):
     
     period_id = st.session_state.current_period_id
     
+    # ✅ 顯示當前期間資訊
+    st.info(f"📅 當前查詢期間 ID: {period_id}")
+    
     df = db.get_electricity_payment_record(period_id)
     
     if df is None or df.empty:
-        empty_state("尚無記錄", "📭", "請先在「計算電費」Tab 完成計算並儲存")
+        empty_state(
+            "尚無記錄", 
+            "📭", 
+            f"請先在「計算電費」Tab 完成計算並按「💾 儲存計費結果到資料庫」\n\n當前期間 ID: {period_id}"
+        )
         return
+    
+    # ✅ 顯示記錄數量
+    st.success(f"✅ 已找到 {len(df)} 筆計費記錄")
     
     summary = db.get_electricity_payment_summary(period_id)
     if summary:
@@ -694,7 +731,7 @@ def render_records_tab(db):
     
     st.divider()
     
-    st.write(f"共 {len(df)} 筆記錄")
+    st.write(f"**共 {len(df)} 筆記錄**")
     data_table(df, key="payment_records")
     
     st.divider()
@@ -719,7 +756,7 @@ def render_records_tab(db):
                         date.today().isoformat()
                     )
                     if ok:
-                        st.success("✅")
+                        st.success("✅ 已標記為已繳")
                         st.rerun()
                     else:
                         st.error(msg)
