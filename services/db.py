@@ -135,7 +135,7 @@ class DatabaseConnectionPool:
 
 # ===== TITLE: 主要資料庫類別 =====
 class SupabaseDB:
-    """Supabase 資料庫操作類別 - v2.3 完整版"""
+    """Supabase 資料庫操作類別 - v2.4 完整修復版"""
     
     def __init__(self):
         self.pool = DatabaseConnectionPool()
@@ -877,11 +877,37 @@ class SupabaseDB:
             return False, str(e)
     
     def save_electricity_record(self, period_id: int, calc_results: list) -> Tuple[bool, str]:
-        """儲存電費計算結果（含原始讀數）"""
+        """
+        ✅ 修復版：儲存電費計算結果（含完整資訊）
+        
+        Args:
+            period_id: 計費期間 ID
+            calc_results: 計算結果列表，每筆包含：
+                - 房號, 樓層, 類型
+                - previous_reading, current_reading
+                - 使用度數, 公用分攤, 總度數
+                - 單價, 應繳金額
+        
+        Returns:
+            (bool, str): 成功/失敗與訊息
+        """
         with self.get_connection() as conn:
             cursor = conn.cursor()
             try:
+                # === 先刪除該期間的舊記錄（避免重複） ===
+                cursor.execute("""
+                    DELETE FROM electricity_records WHERE period_id = %s
+                """, (period_id,))
+                
+                deleted_count = cursor.rowcount
+                if deleted_count > 0:
+                    logger.info(f"🗑️ 刪除 {deleted_count} 筆舊記錄")
+                
+                # === 儲存新記錄 ===
+                success_count = 0
+                
                 for result in calc_results:
+                    # 1️⃣ 儲存讀數到 electricity_readings
                     if 'previous_reading' in result and 'current_reading' in result:
                         cursor.execute("""
                             INSERT INTO electricity_readings 
@@ -900,67 +926,131 @@ class SupabaseDB:
                             result['使用度數']
                         ))
                     
+                    # 2️⃣ 儲存計費記錄到 electricity_records（含完整欄位）
                     cursor.execute("""
                         INSERT INTO electricity_records 
-                        (period_id, room_number, room_type, usage_kwh, public_share_kwh, total_kwh, amount_due, payment_status)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, 'unpaid')
+                        (period_id, room_number, floor, room_type, 
+                         previous_reading, current_reading, usage_kwh, 
+                         public_share_kwh, total_kwh, unit_price, amount_due, 
+                         payment_status, paid_amount, payment_date)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (period_id, room_number) DO UPDATE SET
+                            floor = EXCLUDED.floor,
                             room_type = EXCLUDED.room_type,
+                            previous_reading = EXCLUDED.previous_reading,
+                            current_reading = EXCLUDED.current_reading,
                             usage_kwh = EXCLUDED.usage_kwh,
                             public_share_kwh = EXCLUDED.public_share_kwh,
                             total_kwh = EXCLUDED.total_kwh,
+                            unit_price = EXCLUDED.unit_price,
                             amount_due = EXCLUDED.amount_due
                     """, (
                         period_id,
                         result['房號'],
+                        result['樓層'],
                         result['類型'],
+                        result.get('previous_reading', 0),
+                        result.get('current_reading', 0),
                         result['使用度數'],
                         result['公用分攤'],
                         result['總度數'],
-                        result['應繳金額']
+                        result['單價'],
+                        result['應繳金額'],
+                        'unpaid',  # 預設未繳
+                        0,         # 已繳金額預設 0
+                        None       # 繳費日期預設 None
                     ))
+                    
+                    success_count += 1
                 
-                log_db_operation("INSERT", "electricity_records", True, len(calc_results))
-                logger.info(f"✅ 儲存 {len(calc_results)} 筆電費記錄（含讀數）")
-                return True, "儲存成功"
+                log_db_operation("INSERT", "electricity_records", True, success_count)
+                logger.info(f"✅ 儲存 {success_count} 筆電費記錄（含完整資訊）")
+                return True, f"成功儲存 {success_count} 筆電費記錄"
+            
             except Exception as e:
                 log_db_operation("INSERT", "electricity_records", False, error=str(e))
                 logger.error(f"❌ 儲存電費記錄失敗: {str(e)}")
                 return False, str(e)
     
     def get_electricity_payment_record(self, period_id: int) -> pd.DataFrame:
-        """取得電費繳費記錄"""
+        """
+        ✅ 修復版：取得電費繳費記錄（含完整資訊）
+        
+        Args:
+            period_id: 計費期間 ID
+            
+        Returns:
+            pd.DataFrame: 包含所有欄位的記錄
+        """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
+                
                 cursor.execute("""
                     SELECT 
-                        room_number, amount_due, paid_amount, payment_status,
-                        payment_date, notes, updated_at
+                        room_number,
+                        floor,
+                        room_type,
+                        previous_reading,
+                        current_reading,
+                        usage_kwh,
+                        public_share_kwh,
+                        total_kwh,
+                        unit_price,
+                        amount_due,
+                        paid_amount,
+                        payment_status,
+                        payment_date,
+                        notes,
+                        updated_at
                     FROM electricity_records
                     WHERE period_id = %s
-                    ORDER BY room_number
+                    ORDER BY 
+                        CASE floor
+                            WHEN '1F' THEN 1
+                            WHEN '2F' THEN 2
+                            WHEN '3F' THEN 3
+                            WHEN '4F' THEN 4
+                            ELSE 5
+                        END,
+                        room_number
                 """, (period_id,))
+                
                 rows = cursor.fetchall()
                 
                 if not rows:
+                    logger.warning(f"⚠️ 期間 {period_id} 無電費記錄")
                     return pd.DataFrame()
                 
-                data = [
-                    [
-                        row[0], row[1], row[2] or 0, row[3],
-                        row[4].strftime("%Y-%m-%d") if row[4] else "-",
-                        row[5] or "-",
-                        row[6].strftime("%Y-%m-%d %H:%M") if row[6] else "-"
-                    ]
-                    for row in rows
-                ]
+                # 建立 DataFrame（中文欄位）
+                data = []
+                for row in rows:
+                    data.append({
+                        '房號': row[0],
+                        '樓層': row[1],
+                        '類型': row[2],
+                        '上期讀數': row[3],
+                        '本期讀數': row[4],
+                        '使用度數': row[5],
+                        '公用分攤': row[6],
+                        '總度數': row[7],
+                        '單價': f"${row[8]:.2f}" if row[8] else "-",
+                        '應繳金額': f"${row[9]:,}" if row[9] else "-",
+                        '已繳金額': f"${row[10]:,}" if row[10] else "$0",
+                        '繳費狀態': '✅ 已繳' if row[11] == 'paid' else '⏳ 未繳',
+                        '繳費日期': row[12].strftime('%Y-%m-%d') if row[12] else "-",
+                        '備註': row[13] or "-",
+                        '更新時間': row[14].strftime('%Y-%m-%d %H:%M') if row[14] else "-"
+                    })
                 
                 log_db_operation("SELECT", "electricity_records", True, len(data))
-                return pd.DataFrame(data, columns=["room_number", "amount_due", "paid_amount", "payment_status", "payment_date", "notes", "updated_at"])
+                logger.info(f"✅ 取得 {len(data)} 筆電費記錄")
+                
+                return pd.DataFrame(data)
+        
         except Exception as e:
             log_db_operation("SELECT", "electricity_records", False, error=str(e))
-            logger.error(f"❌ 取得繳費記錄失敗: {str(e)}")
+            logger.error(f"❌ 取得電費記錄失敗: {str(e)}")
             return pd.DataFrame()
     
     def update_electricity_payment(self, period_id: int, room_number: str, 
