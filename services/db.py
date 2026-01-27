@@ -1,7 +1,8 @@
 """
-数据库操作模块 - v2.8 修复版
+数据库操作模块 - v2.9 最终修复版
 ✅ 修复电费表名：electricity_records/electricity_readings/electricity_periods
 ✅ 修复欄位对齐：DataFrame columns 与 UI 完全一致
+✅ 添加 snake_case 别名：兼容 views/electricity.py
 ✅ 加强 logging 和错误处理
 """
 
@@ -151,7 +152,7 @@ class DatabaseConnectionPool:
 
 # ============== 主数据库类 ==============
 class SupabaseDB:
-    """Supabase 数据库操作 - v2.8 修复版"""
+    """Supabase 数据库操作 - v2.9 最终修复版"""
     
     def __init__(self):
         self.pool = DatabaseConnectionPool()
@@ -749,11 +750,11 @@ class SupabaseDB:
         
         return self.retry_on_failure(query)
     
-    # ==================== 电费管理 (v2.8 修复版) ====================
+    # ==================== 电费管理 (v2.9 最终修复版) ====================
     
     def getlatestmeterreading(self, room: str, period_id: int) -> Optional[float]:
         """
-        取得最新电表读数 - v2.8 修复版
+        取得最新电表读数 - v2.9 修复版
         
         Args:
             room: 房号
@@ -798,7 +799,7 @@ class SupabaseDB:
         kwh_used: float
     ) -> Tuple[bool, str]:
         """
-        储存电表读数 - v2.8 修复版
+        储存电表读数 - v2.9 修复版
         
         Args:
             period_id: 期间 ID
@@ -839,7 +840,7 @@ class SupabaseDB:
     
     def addelectricityperiod(self, year: int, month_start: int, month_end: int) -> Tuple[bool, str, Optional[int]]:
         """
-        新增电费期间 - v2.8 修复版
+        新增电费期间 - v2.9 修复版
         
         Args:
             year: 年份
@@ -877,7 +878,7 @@ class SupabaseDB:
     
     def getallperiods(self) -> List[Dict]:
         """
-        取得所有期间 - v2.8 修复版
+        取得所有期间 - v2.9 修复版
         
         Returns:
             期间列表 (List[Dict])
@@ -918,7 +919,7 @@ class SupabaseDB:
     
     def deleteelectricityperiod(self, period_id: int) -> Tuple[bool, str]:
         """
-        删除期间 - v2.8 修复版
+        删除期间 - v2.9 修复版
         
         Args:
             period_id: 期间 ID
@@ -947,7 +948,7 @@ class SupabaseDB:
     
     def saveelectricityrecord(self, period_id: int, calc_results: list) -> Tuple[bool, str]:
         """
-        储存电费计算结果 - v2.8 修复版
+        储存电费计算结果 - v2.9 修复版
         
         Args:
             period_id: 期间 ID
@@ -1045,7 +1046,7 @@ class SupabaseDB:
     
     def getelectricitypaymentrecord(self, period_id: int) -> pd.DataFrame:
         """
-        查询电费缴费记录 - v2.8 修复版
+        查询电费缴费记录 - v2.9 修复版
         
         Args:
             period_id: 期间 ID
@@ -1138,7 +1139,7 @@ class SupabaseDB:
         notes: str = ""
     ) -> Tuple[bool, str]:
         """
-        更新电费缴费状态 - v2.8 修复版
+        更新电费缴费状态 - v2.9 修复版
         
         Args:
             period_id: 期间 ID
@@ -1180,7 +1181,7 @@ class SupabaseDB:
     
     def getelectricitypaymentsummary(self, period_id: int) -> dict:
         """
-        统计电费缴费摘要 - v2.8 修复版
+        统计电费缴费摘要 - v2.9 修复版
         
         Args:
             period_id: 期间 ID
@@ -1234,6 +1235,45 @@ class SupabaseDB:
             log_db_operation("SELECT", "electricity_records summary", False, error=str(e))
             logger.error(f"❌ 统计失败: {str(e)}")
             return {}
+    
+    # ==================== Snake_case 别名 (兼容 v2.7 views/electricity.py) ====================
+    
+    def get_all_periods(self):
+        """别名：getallperiods() - 用于 views/electricity.py"""
+        return self.getallperiods()
+    
+    def add_electricity_period(self, year: int, month_start: int, month_end: int):
+        """别名：addelectricityperiod() - 用于 views/electricity.py"""
+        return self.addelectricityperiod(year, month_start, month_end)
+    
+    def delete_electricity_period(self, period_id: int):
+        """别名：deleteelectricityperiod() - 用于 views/electricity.py"""
+        return self.deleteelectricityperiod(period_id)
+    
+    def get_latest_meter_reading(self, room: str, period_id: int):
+        """别名：getlatestmeterreading() - 用于 views/electricity.py"""
+        return self.getlatestmeterreading(room, period_id)
+    
+    def save_electricity_reading(self, period_id: int, room: str, previous: float, current: float, kwh_used: float):
+        """别名：saveelectricityreading() - 用于 views/electricity.py"""
+        return self.saveelectricityreading(period_id, room, previous, current, kwh_used)
+    
+    def save_electricity_record(self, period_id: int, calc_results: list):
+        """别名：saveelectricityrecord() - 用于 views/electricity.py"""
+        return self.saveelectricityrecord(period_id, calc_results)
+    
+    def get_electricity_payment_record(self, period_id: int):
+        """别名：getelectricitypaymentrecord() - 用于 views/electricity.py"""
+        return self.getelectricitypaymentrecord(period_id)
+    
+    def update_electricity_payment(self, period_id: int, room_number: str, payment_status: str, 
+                                   paid_amount: int = 0, payment_date: str = None, notes: str = ""):
+        """别名：updateelectricitypayment() - 用于 views/electricity.py"""
+        return self.updateelectricitypayment(period_id, room_number, payment_status, paid_amount, payment_date, notes)
+    
+    def get_electricity_payment_summary(self, period_id: int):
+        """别名：getelectricitypaymentsummary() - 用于 views/electricity.py"""
+        return self.getelectricitypaymentsummary(period_id)
 
 
 # ============== Streamlit 缓存 ==============
@@ -1271,5 +1311,3 @@ if __name__ == "__main__":
     logger.info("=" * 50)
     logger.info("services/db.py 测试完成")
     logger.info("=" * 50 + "\n")
-    
-    # Streamlit 环境下会自动调用 get_db()
