@@ -582,6 +582,17 @@ def render_calculation_tab(db):
             room = detail['房號']
             detail['previous_reading'] = raw[room]['previous']
             detail['current_reading'] = raw[room]['current']
+                
+    # ✅ v2.8 修復：添加簡體中文欄位別名（兼容 db.py v2.9）
+    # 保留原有繁體欄位用於顯示，新增簡體欄位用於儲存
+    detail['房号'] = detail.get('房號', '')
+    detail['楼层'] = detail.get('樓層', '')
+    detail['类型'] = detail.get('類型', '')
+    detail['使用度数'] = detail.get('使用度數', 0)
+    detail['公用分摊'] = detail.get('公用分攤', 0)
+    detail['总度数'] = detail.get('總度數', 0)
+    detail['单价'] = detail.get('單價', 0)
+    detail['应缴金额'] = detail.get('應繳金額', 0)
             enriched_details.append(detail)
         
         # ✅ 儲存到 session_state
@@ -802,3 +813,4 @@ def render(db):
     
     with tab3:
         render_records_tab(db)
+
