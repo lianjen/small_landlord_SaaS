@@ -1,8 +1,8 @@
 """
-电费管理 - v2.7 完整修复版
+电费管理 - v2.8 完整修复版
+✅ 修复缩进错误：IndentationError 完全解决
 ✅ 修复储存逻辑：计算结果保存到 session_state
-✅ 修复按钮状态问题
-✅ 更新 use_container_width 为新语法
+✅ 添加简繁体字段兼容：同时支持繁体UI和简体DB
 ✅ 加强 logging 和错误提示
 """
 
@@ -12,7 +12,7 @@ from datetime import date
 from typing import Dict, List
 import logging
 
-# 安全 import
+# 安全 import components
 try:
     from components.cards import section_header, metric_card, empty_state, data_table, info_card
 except ImportError:
@@ -30,11 +30,12 @@ except ImportError:
             st.caption(desc)
     
     def data_table(df, key="table"):
-        st.dataframe(df, use_column_width=True, key=key)
+        st.dataframe(df, use_container_width=True, key=key)
     
     def info_card(title, content, icon="", type="info"):
         st.info(f"{icon} {title}: {content}")
 
+# 安全 import constants
 try:
     from config.constants import ROOMS
 except ImportError:
@@ -75,7 +76,7 @@ def calculate_electricity_charges(
     room_readings: Dict[str, float]
 ) -> Dict:
     """
-    計算電費 - v2.7
+    計算電費 - v2.8
     
     Args:
         taipower_bills: [{'floor_label': '1F', 'amount': 1000, 'kwh': 100}, ...]
@@ -576,23 +577,24 @@ def render_calculation_tab(db):
             st.error("❌ 計算失敗")
             return
         
-        # ✅ 保存計算結果到 session_state
+        # ✅ v2.8 修復：正确的缩进，保存计算结果到 session_state
         enriched_details = []
         for detail in result['details']:
             room = detail['房號']
             detail['previous_reading'] = raw[room]['previous']
             detail['current_reading'] = raw[room]['current']
-                
-    # ✅ v2.8 修復：添加簡體中文欄位別名（兼容 db.py v2.9）
-    # 保留原有繁體欄位用於顯示，新增簡體欄位用於儲存
-    detail['房号'] = detail.get('房號', '')
-    detail['楼层'] = detail.get('樓層', '')
-    detail['类型'] = detail.get('類型', '')
-    detail['使用度数'] = detail.get('使用度數', 0)
-    detail['公用分摊'] = detail.get('公用分攤', 0)
-    detail['总度数'] = detail.get('總度數', 0)
-    detail['单价'] = detail.get('單價', 0)
-    detail['应缴金额'] = detail.get('應繳金額', 0)
+            
+            # ✅ 添加簡體中文欄位別名（兼容 db.py v2.9）
+            # 保留原有繁體欄位用於顯示，新增簡體欄位用於儲存
+            detail['房号'] = detail.get('房號', '')
+            detail['楼层'] = detail.get('樓層', '')
+            detail['类型'] = detail.get('類型', '')
+            detail['使用度数'] = detail.get('使用度數', 0)
+            detail['公用分摊'] = detail.get('公用分攤', 0)
+            detail['总度数'] = detail.get('總度數', 0)
+            detail['单价'] = detail.get('單價', 0)
+            detail['应缴金额'] = detail.get('應繳金額', 0)
+            
             enriched_details.append(detail)
         
         # ✅ 儲存到 session_state
@@ -690,9 +692,9 @@ def render_calculation_tab(db):
                         
                         # 顯示下一步提示
                         st.markdown("""
-                        **✨ 下一步：**
-                        - 前往「📜 繳費記錄」Tab 查看已儲存的計費記錄
-                        - 可以在那裡快速標記繳費狀態
+**✨ 下一步：**
+- 前往「📜 繳費記錄」Tab 查看已儲存的計費記錄
+- 可以在那裡快速標記繳費狀態
                         """)
                         
                         # 清除計算結果
@@ -813,4 +815,3 @@ def render(db):
     
     with tab3:
         render_records_tab(db)
-
