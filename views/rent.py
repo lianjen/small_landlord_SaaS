@@ -1,10 +1,9 @@
-# views/rent.py v2.0 - 批量建立排程增強版（修正欄位名稱）
+# views/rent.py v2.1 - 修正版（使用正確的 Service 方法）
 """
-租金管理頁面 v2.0
-職責：UI 展示與使用者互動，業務邏輯委派給 PaymentService
-✅ Tab 1 增強：選擇特定房間 + 批量建立多個月份
-✅ Tab 2-4：保留原有功能
-✅ 修正：使用正確的資料庫欄位 base_rent
+租金管理頁面 v2.1
+✅ 修正：使用正確的 PaymentService 方法建立排程
+✅ 修正：st.metric 空 label 警告
+✅ 修正：use_container_width 改為 width
 """
 import streamlit as st
 from datetime import datetime, date
@@ -46,11 +45,11 @@ def render_rent_page():
     with tab4:
         render_reports_tab(service)
 
-# ==================== Tab 1: 批量建立排程（增強版）====================
+# ==================== Tab 1: 批量建立排程（增強版 + 修正）====================
 def render_batch_schedule_tab(service: PaymentService):
-    """批量建立排程頁籤 v2.0 - 增強版：可選房間 + 批量月份"""
+    """批量建立排程頁籤 v2.1 - 修正版"""
     
-    st.subheader("📅 批量建立月租金排程 v2.0")
+    st.subheader("📅 批量建立月租金排程 v2.1")
     st.caption("💡 選擇特定房間，一次建立多個月份的租金記錄")
     
     st.divider()
@@ -117,7 +116,7 @@ def render_batch_schedule_tab(service: PaymentService):
     if st.session_state.batch_mode == 'select':
         st.markdown("### 🏠 選擇房間")
         
-        # 多選房號（✅ 修正：使用 base_rent）
+        # 多選房號
         selected_rooms = st.multiselect(
             "請選擇要建立租金記錄的房間（可多選）",
             options=room_list,
@@ -219,9 +218,15 @@ def render_batch_schedule_tab(service: PaymentService):
     st.markdown("### 👀 預覽建立項目")
     
     total_records = len(selected_rooms) * num_months
-    st.metric("", f"{total_records} 筆租金記錄", delta=f"{len(selected_rooms)} 房間 × {num_months} 月")
     
-    # 明細表格（✅ 修正：使用 base_rent）
+    # ✅ 修正：給 metric 一個有意義的 label
+    st.metric(
+        label="預計建立",
+        value=f"{total_records} 筆租金記錄",
+        delta=f"{len(selected_rooms)} 房間 × {num_months} 月"
+    )
+    
+    # 明細表格
     with st.expander("📋 查看詳細明細", expanded=False):
         preview_data = []
         
@@ -278,23 +283,41 @@ def render_batch_schedule_tab(service: PaymentService):
                             status_text.text(f"處理中... {current}/{total_items} ({room} - {month_info['display']})")
                             
                             try:
-                                ok, msg = service.create_payment_schedule(
-                                    tenant_id=tenant['id'],
-                                    year=month_info['year'],
-                                    month=month_info['month']
-                                )
-                                
-                                if ok:
-                                    success_count += 1
-                                elif "已存在" in msg:
+                                # ✅ 修正：使用正確的方式建立單一排程
+                                # 檢查是否已存在
+                                if service.payment_repo.schedule_exists(room, month_info['year'], month_info['month']):
                                     skip_count += 1
+                                    continue
+                                
+                                # 計算租金
+                                rent_calc = service.calculate_monthly_rent(tenant, month_info['month'])
+                                
+                                # 建立排程
+                                due_date = datetime(month_info['year'], month_info['month'], 5)
+                                
+                                schedule_data = {
+                                    'room_number': room,
+                                    'tenant_name': tenant['tenant_name'],
+                                    'payment_year': month_info['year'],
+                                    'payment_month': month_info['month'],
+                                    'amount': rent_calc.final_amount,
+                                    'payment_method': tenant.get('payment_method', 'cash'),
+                                    'due_date': due_date,
+                                    'status': 'unpaid'
+                                }
+                                
+                                schedule_id = service.payment_repo.create_schedule(schedule_data)
+                                
+                                if schedule_id:
+                                    success_count += 1
                                 else:
                                     fail_count += 1
-                                    error_messages.append(f"{room} ({month_info['display']}): {msg}")
+                                    error_messages.append(f"{room} ({month_info['display']}): 建立失敗")
                             
                             except Exception as e:
                                 fail_count += 1
                                 error_messages.append(f"{room} ({month_info['display']}): {str(e)}")
+                                logger.error(f"建立排程失敗: {room} - {month_info['display']}: {str(e)}", exc_info=True)
                     
                     progress_bar.progress(1.0)
                     status_text.text("✅ 完成！")
@@ -342,7 +365,7 @@ def render_batch_schedule_tab(service: PaymentService):
             st.rerun()
 
 
-# ==================== Tab 2: 本月摘要（原功能保留）====================
+# ==================== Tab 2-4: 保持原有功能 ====================
 def render_monthly_summary_tab(service: PaymentService):
     """本月摘要頁籤（含房號篩選和單獨標記）"""
     st.subheader("📊 本月租金收款摘要")
@@ -591,8 +614,6 @@ def render_monthly_summary_tab(service: PaymentService):
         st.error(f"❌ 載入摘要失敗: {str(e)}")
         logger.error(f"載入摘要錯誤: {str(e)}", exc_info=True)
 
-
-# ==================== Tab 3: 收款管理（原功能保留）====================
 def render_payment_management_tab(service: PaymentService):
     """收款管理頁籤（含房號篩選）"""
     st.subheader("💳 收款管理")
@@ -705,8 +726,6 @@ def render_payment_management_tab(service: PaymentService):
         st.error(f"❌ 載入資料失敗: {str(e)}")
         logger.error(f"收款管理錯誤: {str(e)}", exc_info=True)
 
-
-# ==================== Tab 4: 報表分析（原功能保留）====================
 def render_reports_tab(service: PaymentService):
     """報表分析頁籤"""
     st.subheader("📈 報表分析")
