@@ -1,10 +1,13 @@
-# views/rent.py (完整版 - 含房號篩選功能)
+# views/rent.py v2.0 - 批量建立排程增強版
 """
-租金管理頁面
+租金管理頁面 v2.0
 職責：UI 展示與使用者互動，業務邏輯委派給 PaymentService
+✅ Tab 1 增強：選擇特定房間 + 批量建立多個月份
+✅ Tab 2-4：保留原有功能
 """
 import streamlit as st
-from datetime import datetime
+from datetime import datetime, date
+from dateutil.relativedelta import relativedelta
 from services.payment_service import PaymentService
 from services.logger import logger
 from repository.tenant_repository import TenantRepository
@@ -34,7 +37,7 @@ def render_rent_page():
     ])
     
     with tab1:
-        render_batch_schedule_tab(service)
+        render_batch_schedule_tab(service)  # ✅ 使用增強版
     with tab2:
         render_monthly_summary_tab(service)
     with tab3:
@@ -42,53 +45,303 @@ def render_rent_page():
     with tab4:
         render_reports_tab(service)
 
+# ==================== Tab 1: 批量建立排程（增強版）====================
 def render_batch_schedule_tab(service: PaymentService):
-    """批量建立排程頁籤"""
-    st.subheader("📅 批量建立月租金排程")
-    st.info("💡 一鍵為所有房客建立指定月份的租金記錄")
+    """批量建立排程頁籤 v2.0 - 增強版：可選房間 + 批量月份"""
     
-    col1, col2, col3 = st.columns([2, 2, 3])
+    st.subheader("📅 批量建立月租金排程 v2.0")
+    st.caption("💡 選擇特定房間，一次建立多個月份的租金記錄")
+    
+    st.divider()
+    
+    # === 載入房客資料 ===
+    try:
+        tenant_repo = TenantRepository()
+        tenants = tenant_repo.get_active_tenants()
+        
+        if not tenants:
+            st.warning("⚠️ 尚無房客資料，請先前往「👥 房客管理」新增房客")
+            return
+        
+        # 按房號分組
+        tenants_by_room = {}
+        for t in tenants:
+            room = t['room_number']
+            tenants_by_room[room] = t
+        
+        room_list = sorted(tenants_by_room.keys())
+    
+    except Exception as e:
+        st.error(f"❌ 載入房客資料失敗: {str(e)}")
+        logger.error(f"載入房客資料錯誤: {str(e)}", exc_info=True)
+        return
+    
+    # === 選擇模式 ===
+    st.markdown("### 🎯 選擇建立模式")
+    
+    col_mode1, col_mode2 = st.columns(2)
+    
+    with col_mode1:
+        mode_all = st.button(
+            "🏘️ 全部房間",
+            use_container_width=True,
+            help="為所有現有房客建立租金記錄"
+        )
+    
+    with col_mode2:
+        mode_select = st.button(
+            "🏠 選擇房間",
+            use_container_width=True,
+            type="primary",
+            help="選擇特定房間建立租金記錄"
+        )
+    
+    # 初始化 session state
+    if 'batch_mode' not in st.session_state:
+        st.session_state.batch_mode = 'select'  # 預設為選擇模式
+    
+    if mode_all:
+        st.session_state.batch_mode = 'all'
+        st.rerun()
+    
+    if mode_select:
+        st.session_state.batch_mode = 'select'
+        st.rerun()
+    
+    st.divider()
+    
+    # === 房間選擇（選擇模式）===
+    selected_rooms = []
+    
+    if st.session_state.batch_mode == 'select':
+        st.markdown("### 🏠 選擇房間")
+        
+        # 多選房號
+        selected_rooms = st.multiselect(
+            "請選擇要建立租金記錄的房間（可多選）",
+            options=room_list,
+            default=[],
+            format_func=lambda x: f"{x} - {tenants_by_room[x]['tenant_name']} (${tenants_by_room[x]['rent_amount']:,.0f}/月)",
+            key="selected_rooms_for_batch"
+        )
+        
+        if not selected_rooms:
+            st.info("👆 請先選擇至少一個房間")
+            return
+        
+        # 顯示選中的房客資訊
+        st.caption("**已選擇：**")
+        cols = st.columns(min(len(selected_rooms), 4))
+        
+        for idx, room in enumerate(selected_rooms):
+            tenant = tenants_by_room[room]
+            with cols[idx % 4]:
+                st.metric(
+                    label=room,
+                    value=f"${tenant['rent_amount']:,.0f}",
+                    delta=tenant['tenant_name']
+                )
+        
+        st.divider()
+    
+    else:
+        # 全部房間模式
+        selected_rooms = room_list
+        st.info(f"📊 將為 **{len(selected_rooms)}** 個房間建立租金記錄")
+        st.divider()
+    
+    # === 設定時間範圍 ===
+    st.markdown("### 📅 設定時間範圍")
+    
+    col1, col2 = st.columns([2, 2])
     
     with col1:
-        year = st.number_input(
-            "年份",
+        start_year = st.number_input(
+            "起始年份",
             min_value=2020,
-            max_value=2030, 
-            value=datetime.now().year,
-            step=1
+            max_value=2030,
+            value=date.today().year,
+            step=1,
+            key="batch_start_year"
         )
     
     with col2:
-        month = st.number_input(
-            "月份",
-            min_value=1,
-            max_value=12,
-            value=datetime.now().month,
-            step=1
+        start_month = st.selectbox(
+            "起始月份",
+            range(1, 13),
+            index=date.today().month - 1,
+            key="batch_start_month"
         )
     
-    with col3:
-        st.write("")  # 對齊
-        st.write("")
-        create_btn = st.button("🚀 一鍵建立排程", type="primary", width="stretch")
+    st.divider()
     
-    if create_btn:
-        with st.spinner(f"正在建立 {year}/{month:02d} 的租金排程..."):
-            try:
-                results = service.create_monthly_schedule_batch(year, month)
-                st.success(
-                    f"✅ 排程建立完成！\n\n"
-                    f"• 新增：{results['created']} 筆\n"
-                    f"• 跳過：{results['skipped']} 筆（已存在）\n"
-                    f"• 失敗：{results['errors']} 筆"
-                )
-                if results['errors'] > 0:
-                    st.warning("⚠️ 部分排程建立失敗，請檢查日誌或聯繫管理員")
-                logger.info(f"使用者批量建立排程: {year}/{month} - {results}")
-            except Exception as e:
-                st.error(f"❌ 建立失敗: {str(e)}")
-                logger.error(f"批量建立排程錯誤: {str(e)}", exc_info=True)
+    # === 批量建立月份數 ===
+    st.markdown("### 🗓️ 批量建立月份數")
+    
+    col_month1, col_month2 = st.columns([3, 1])
+    
+    with col_month1:
+        num_months = st.slider(
+            "一次建立幾個月？",
+            min_value=1,
+            max_value=12,
+            value=1,
+            help="例如：選擇 3，則會建立連續 3 個月的租金記錄",
+            key="batch_num_months"
+        )
+    
+    with col_month2:
+        st.write("")
+        st.write("")
+        st.metric("建立月數", f"{num_months} 個月")
+    
+    # 計算月份範圍
+    start_date = date(start_year, start_month, 1)
+    month_range = []
+    
+    for i in range(num_months):
+        target_date = start_date + relativedelta(months=i)
+        month_range.append({
+            'year': target_date.year,
+            'month': target_date.month,
+            'display': f"{target_date.year}/{target_date.month:02d}"
+        })
+    
+    # 顯示將建立的月份
+    st.caption("**將建立以下月份：**")
+    month_display = " → ".join([m['display'] for m in month_range])
+    st.info(f"📅 {month_display}")
+    
+    st.divider()
+    
+    # === 預覽建立項目 ===
+    st.markdown("### 👀 預覽建立項目")
+    
+    total_records = len(selected_rooms) * num_months
+    st.metric("", f"{total_records} 筆租金記錄", delta=f"{len(selected_rooms)} 房間 × {num_months} 月")
+    
+    # 明細表格
+    with st.expander("📋 查看詳細明細", expanded=False):
+        preview_data = []
+        
+        for room in selected_rooms:
+            tenant = tenants_by_room[room]
+            
+            for month_info in month_range:
+                preview_data.append({
+                    '房號': room,
+                    '房客': tenant['tenant_name'],
+                    '年份': month_info['year'],
+                    '月份': f"{month_info['month']:02d}",
+                    '租金': f"${tenant['rent_amount']:,.0f}"
+                })
+        
+        st.dataframe(
+            preview_data,
+            use_container_width=True,
+            hide_index=True
+        )
+    
+    st.divider()
+    
+    # === 建立按鈕 ===
+    col_btn1, col_btn2 = st.columns([3, 1])
+    
+    with col_btn1:
+        if st.button(
+            f"🚀 一鍵建立排程（{total_records} 筆）",
+            type="primary",
+            use_container_width=True,
+            key="batch_create_btn"
+        ):
+            with st.spinner("正在建立租金記錄..."):
+                try:
+                    success_count = 0
+                    fail_count = 0
+                    skip_count = 0
+                    error_messages = []
+                    
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    total_items = len(selected_rooms) * num_months
+                    current = 0
+                    
+                    for room in selected_rooms:
+                        tenant = tenants_by_room[room]
+                        
+                        for month_info in month_range:
+                            current += 1
+                            progress = current / total_items
+                            progress_bar.progress(progress)
+                            status_text.text(f"處理中... {current}/{total_items} ({room} - {month_info['display']})")
+                            
+                            try:
+                                ok, msg = service.create_payment_schedule(
+                                    tenant_id=tenant['id'],
+                                    year=month_info['year'],
+                                    month=month_info['month']
+                                )
+                                
+                                if ok:
+                                    success_count += 1
+                                elif "已存在" in msg:
+                                    skip_count += 1
+                                else:
+                                    fail_count += 1
+                                    error_messages.append(f"{room} ({month_info['display']}): {msg}")
+                            
+                            except Exception as e:
+                                fail_count += 1
+                                error_messages.append(f"{room} ({month_info['display']}): {str(e)}")
+                    
+                    progress_bar.progress(1.0)
+                    status_text.text("✅ 完成！")
+                    
+                    # 顯示結果
+                    st.divider()
+                    
+                    col_result1, col_result2, col_result3 = st.columns(3)
+                    
+                    with col_result1:
+                        st.metric("✅ 成功建立", f"{success_count} 筆")
+                    
+                    with col_result2:
+                        st.metric("⏭️ 已存在（跳過）", f"{skip_count} 筆")
+                    
+                    with col_result3:
+                        st.metric("❌ 失敗", f"{fail_count} 筆")
+                    
+                    if success_count > 0:
+                        st.success(f"🎉 成功建立 {success_count} 筆租金記錄！")
+                        logger.info(f"批量建立租金記錄成功: {success_count} 筆")
+                    
+                    if skip_count > 0:
+                        st.info(f"⏭️ 跳過 {skip_count} 筆已存在的記錄")
+                    
+                    if fail_count > 0:
+                        st.error(f"❌ {fail_count} 筆建立失敗")
+                        
+                        with st.expander("查看錯誤詳情"):
+                            for msg in error_messages:
+                                st.text(f"• {msg}")
+                        
+                        logger.error(f"批量建立租金記錄部分失敗: {fail_count} 筆")
+                
+                except Exception as e:
+                    st.error(f"❌ 批量建立失敗: {str(e)}")
+                    logger.error(f"批量建立租金記錄異常: {str(e)}", exc_info=True)
+    
+    with col_btn2:
+        if st.button("🔄 重置", use_container_width=True):
+            # 清除 session state
+            if 'selected_rooms_for_batch' in st.session_state:
+                del st.session_state['selected_rooms_for_batch']
+            st.session_state.batch_mode = 'select'
+            st.rerun()
 
+
+# ==================== Tab 2: 本月摘要（原功能保留）====================
 def render_monthly_summary_tab(service: PaymentService):
     """本月摘要頁籤（含房號篩選和單獨標記）"""
     st.subheader("📊 本月租金收款摘要")
@@ -297,12 +550,12 @@ def render_monthly_summary_tab(service: PaymentService):
             col_btn1, col_btn2, col_btn3 = st.columns(3)
             
             with col_btn1:
-                if st.button("📌 全選", use_container_width=True):
+                if st.button("📌 全選", use_container_width=True, key="monthly_select_all"):
                     st.session_state.selected_monthly = unpaid_df['id'].tolist()
                     st.rerun()
             
             with col_btn2:
-                if st.button("🔄 清除", use_container_width=True):
+                if st.button("🔄 清除", use_container_width=True, key="monthly_clear"):
                     st.session_state.selected_monthly = []
                     st.rerun()
             
@@ -312,7 +565,8 @@ def render_monthly_summary_tab(service: PaymentService):
                     f"✅ 標記 ({len(selected_ids)})",
                     type="primary",
                     disabled=len(selected_ids) == 0,
-                    use_container_width=True
+                    use_container_width=True,
+                    key="monthly_mark_paid"
                 ):
                     with st.spinner("處理中..."):
                         try:
@@ -336,6 +590,8 @@ def render_monthly_summary_tab(service: PaymentService):
         st.error(f"❌ 載入摘要失敗: {str(e)}")
         logger.error(f"載入摘要錯誤: {str(e)}", exc_info=True)
 
+
+# ==================== Tab 3: 收款管理（原功能保留）====================
 def render_payment_management_tab(service: PaymentService):
     """收款管理頁籤（含房號篩選）"""
     st.subheader("💳 收款管理")
@@ -448,6 +704,8 @@ def render_payment_management_tab(service: PaymentService):
         st.error(f"❌ 載入資料失敗: {str(e)}")
         logger.error(f"收款管理錯誤: {str(e)}", exc_info=True)
 
+
+# ==================== Tab 4: 報表分析（原功能保留）====================
 def render_reports_tab(service: PaymentService):
     """報表分析頁籤"""
     st.subheader("📈 報表分析")
