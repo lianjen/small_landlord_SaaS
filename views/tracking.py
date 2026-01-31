@@ -1,10 +1,11 @@
-# views/tracking.py v2.0 - 整合租金 + 電費追蹤
+# views/tracking.py v2.0.1 - 修復類型轉換錯誤
 """
-繳費追蹤頁面 v2.0
+繳費追蹤頁面 v2.0.1
 職責：追蹤租金與電費繳費狀態，支援房號篩選與快速標記
 ✅ 保留：原有租金追蹤功能
 ✅ 新增：電費追蹤功能
 ✅ 新增：綜合追蹤視圖（租金+電費）
+✅ 修復：Decimal 與 float 類型轉換錯誤
 """
 import streamlit as st
 from datetime import datetime, date
@@ -12,13 +13,14 @@ from services.payment_service import PaymentService
 from services.logger import logger
 from repository.tenant_repository import TenantRepository
 import pandas as pd
+from decimal import Decimal
 
 def render(db):
     """主入口函式（供 main.py 動態載入使用）"""
     render_tracking_page(db)
 
 def render_tracking_page(db):
-    """渲染繳費追蹤頁面 - v2.0 整合版"""
+    """渲染繳費追蹤頁面 - v2.0.1"""
     st.title("📋 繳費追蹤")
     
     # === 建立 Tabs ===
@@ -35,6 +37,25 @@ def render_tracking_page(db):
     # === Tab 3: 綜合追蹤（整合視圖）===
     with tab3:
         render_combined_tracking(db)
+
+
+# ==================== 輔助函數：統一金額轉換 ====================
+def safe_float(value):
+    """安全地將任何類型轉換為 float"""
+    try:
+        if value is None:
+            return 0.0
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, Decimal):
+            return float(value)
+        if isinstance(value, str):
+            # 移除 $, 逗號, 空格
+            clean_value = str(value).replace('$', '').replace(',', '').replace(' ', '')
+            return float(clean_value) if clean_value else 0.0
+        return float(value)
+    except (ValueError, TypeError):
+        return 0.0
 
 
 # ==================== Tab 1: 租金追蹤（原功能保留）====================
@@ -166,11 +187,13 @@ def render_rent_tracking():
             st.metric("逾期", f"{total_overdue} 筆", delta="-" if total_overdue > 0 else "正常", delta_color="inverse")
         
         with col3:
-            total_amount = df[df['status'] == 'unpaid']['amount'].sum()
+            # ✅ 修復：統一轉換為 float
+            total_amount = sum(safe_float(amount) for amount in df[df['status'] == 'unpaid']['amount'])
             st.metric("待收金額", f"${total_amount:,.0f}")
         
         with col4:
-            overdue_amount = df[df['days_overdue'] > 0]['amount'].sum()
+            # ✅ 修復：統一轉換為 float
+            overdue_amount = sum(safe_float(amount) for amount in df[df['days_overdue'] > 0]['amount'])
             st.metric("逾期金額", f"${overdue_amount:,.0f}")
         
         st.divider()
@@ -222,7 +245,7 @@ def render_rent_tracking():
                         f"{unpaid_df[unpaid_df['id']==x]['tenant_name'].values[0]} "
                         f"({unpaid_df[unpaid_df['id']==x]['payment_year'].values[0]}/"
                         f"{unpaid_df[unpaid_df['id']==x]['payment_month'].values[0]:02d}) "
-                        f"${unpaid_df[unpaid_df['id']==x]['amount'].values[0]:,.0f}"
+                        f"${safe_float(unpaid_df[unpaid_df['id']==x]['amount'].values[0]):,.0f}"
                     ),
                     key="rent_multiselect"
                 )
@@ -289,7 +312,7 @@ def render_rent_tracking():
 
 # ==================== Tab 2: 電費追蹤（新功能）====================
 def render_electricity_tracking(db):
-    """電費追蹤（新功能）- v2.0"""
+    """電費追蹤（新功能）- v2.0.1"""
     
     st.subheader("⚡ 電費繳費追蹤")
     
@@ -400,15 +423,9 @@ def render_electricity_tracking(db):
             # === 統計摘要 ===
             col1, col2, col3, col4 = st.columns(4)
             
-            # 提取金額（移除 $ 和逗號）
-            def extract_amount(amount_str):
-                try:
-                    return float(str(amount_str).replace('$', '').replace(',', '').replace(' ', ''))
-                except:
-                    return 0
-            
-            df['應繳金額_數值'] = df['應繳金額'].apply(extract_amount)
-            df['已繳金額_數值'] = df['已繳金額'].apply(extract_amount)
+            # ✅ 修復：使用 safe_float 統一轉換
+            df['應繳金額_數值'] = df['應繳金額'].apply(safe_float)
+            df['已繳金額_數值'] = df['已繳金額'].apply(safe_float)
             
             with col1:
                 unpaid_count = len(df[df['繳費狀態'] == '⏳ 未繳'])
@@ -491,7 +508,7 @@ def render_electricity_tracking(db):
 
 # ==================== Tab 3: 綜合追蹤（整合視圖）====================
 def render_combined_tracking(db):
-    """綜合追蹤（租金 + 電費整合視圖）- v2.0"""
+    """綜合追蹤（租金 + 電費整合視圖）- v2.0.1"""
     
     st.subheader("📊 綜合繳費追蹤")
     st.caption("💡 查看租金與電費的整體繳費狀況")
@@ -504,12 +521,14 @@ def render_combined_tracking(db):
         rent_unpaid = service.get_unpaid_payments()
         rent_df = pd.DataFrame(rent_unpaid) if rent_unpaid else pd.DataFrame()
         
-        rent_total = rent_df['amount'].sum() if not rent_df.empty else 0
+        # ✅ 修復：統一轉換為 float
+        rent_total = sum(safe_float(amount) for amount in rent_df['amount']) if not rent_df.empty else 0.0
         rent_count = len(rent_df)
     
     except Exception as e:
         st.error(f"❌ 載入租金數據失敗: {str(e)}")
-        rent_total = 0
+        logger.error(f"租金數據載入錯誤: {str(e)}", exc_info=True)
+        rent_total = 0.0
         rent_count = 0
         rent_df = pd.DataFrame()
     
@@ -527,31 +546,26 @@ def render_combined_tracking(db):
             elec_df = db.get_electricity_payment_record(period_id)
             
             if elec_df is not None and not elec_df.empty:
-                # 提取金額
-                def extract_amount(amount_str):
-                    try:
-                        return float(str(amount_str).replace('$', '').replace(',', '').replace(' ', ''))
-                    except:
-                        return 0
-                
-                elec_df['應繳金額_數值'] = elec_df['應繳金額'].apply(extract_amount)
+                # ✅ 修復：使用 safe_float 統一轉換
+                elec_df['應繳金額_數值'] = elec_df['應繳金額'].apply(safe_float)
                 elec_unpaid_df = elec_df[elec_df['繳費狀態'] == '⏳ 未繳']
                 
                 elec_total = elec_unpaid_df['應繳金額_數值'].sum()
                 elec_count = len(elec_unpaid_df)
             else:
-                elec_total = 0
+                elec_total = 0.0
                 elec_count = 0
                 elec_unpaid_df = pd.DataFrame()
         else:
             st.warning("⚠️ 尚未建立電費期間")
-            elec_total = 0
+            elec_total = 0.0
             elec_count = 0
             elec_unpaid_df = pd.DataFrame()
     
     except Exception as e:
         st.error(f"❌ 載入電費數據失敗: {str(e)}")
-        elec_total = 0
+        logger.error(f"電費數據載入錯誤: {str(e)}", exc_info=True)
+        elec_total = 0.0
         elec_count = 0
         elec_unpaid_df = pd.DataFrame()
     
@@ -575,7 +589,8 @@ def render_combined_tracking(db):
         )
     
     with col3:
-        total_amount = rent_total + elec_total
+        # ✅ 修復：確保都是 float 再相加
+        total_amount = float(rent_total) + float(elec_total)
         st.metric(
             "💵 總待收金額",
             f"${total_amount:,.0f}",
@@ -605,12 +620,15 @@ def render_combined_tracking(db):
                 axis=1
             )
             
+            # ✅ 修復：格式化金額
+            display_df['amount_display'] = display_df['amount'].apply(lambda x: f"${safe_float(x):,.0f}")
+            
             st.dataframe(
-                display_df[['room_number', 'tenant_name', 'payment_period', 'amount']].rename(columns={
+                display_df[['room_number', 'tenant_name', 'payment_period', 'amount_display']].rename(columns={
                     'room_number': '房號',
                     'tenant_name': '房客',
                     'payment_period': '期間',
-                    'amount': '金額'
+                    'amount_display': '金額'
                 }),
                 use_container_width=True,
                 hide_index=True
