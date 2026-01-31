@@ -1,9 +1,10 @@
-# views/rent.py v2.0 - 批量建立排程增強版
+# views/rent.py v2.0 - 批量建立排程增強版（修正欄位名稱）
 """
 租金管理頁面 v2.0
 職責：UI 展示與使用者互動，業務邏輯委派給 PaymentService
 ✅ Tab 1 增強：選擇特定房間 + 批量建立多個月份
 ✅ Tab 2-4：保留原有功能
+✅ 修正：使用正確的資料庫欄位 base_rent
 """
 import streamlit as st
 from datetime import datetime, date
@@ -116,12 +117,12 @@ def render_batch_schedule_tab(service: PaymentService):
     if st.session_state.batch_mode == 'select':
         st.markdown("### 🏠 選擇房間")
         
-        # 多選房號
+        # 多選房號（✅ 修正：使用 base_rent）
         selected_rooms = st.multiselect(
             "請選擇要建立租金記錄的房間（可多選）",
             options=room_list,
             default=[],
-            format_func=lambda x: f"{x} - {tenants_by_room[x]['tenant_name']} (${tenants_by_room[x]['rent_amount']:,.0f}/月)",
+            format_func=lambda x: f"{x} - {tenants_by_room[x]['tenant_name']} (${tenants_by_room[x]['base_rent']:,.0f}/月)",
             key="selected_rooms_for_batch"
         )
         
@@ -138,7 +139,7 @@ def render_batch_schedule_tab(service: PaymentService):
             with cols[idx % 4]:
                 st.metric(
                     label=room,
-                    value=f"${tenant['rent_amount']:,.0f}",
+                    value=f"${tenant['base_rent']:,.0f}",
                     delta=tenant['tenant_name']
                 )
         
@@ -220,7 +221,7 @@ def render_batch_schedule_tab(service: PaymentService):
     total_records = len(selected_rooms) * num_months
     st.metric("", f"{total_records} 筆租金記錄", delta=f"{len(selected_rooms)} 房間 × {num_months} 月")
     
-    # 明細表格
+    # 明細表格（✅ 修正：使用 base_rent）
     with st.expander("📋 查看詳細明細", expanded=False):
         preview_data = []
         
@@ -233,7 +234,7 @@ def render_batch_schedule_tab(service: PaymentService):
                     '房客': tenant['tenant_name'],
                     '年份': month_info['year'],
                     '月份': f"{month_info['month']:02d}",
-                    '租金': f"${tenant['rent_amount']:,.0f}"
+                    '租金': f"${tenant['base_rent']:,.0f}"
                 })
         
         st.dataframe(
