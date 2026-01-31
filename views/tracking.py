@@ -1,7 +1,10 @@
-# views/tracking.py (完整版 - 含房號篩選功能)
+# views/tracking.py v2.0 - 整合租金 + 電費追蹤
 """
-繳費追蹤頁面
-職責：追蹤租金繳費狀態，支援房號篩選與快速標記
+繳費追蹤頁面 v2.0
+職責：追蹤租金與電費繳費狀態，支援房號篩選與快速標記
+✅ 保留：原有租金追蹤功能
+✅ 新增：電費追蹤功能
+✅ 新增：綜合追蹤視圖（租金+電費）
 """
 import streamlit as st
 from datetime import datetime, date
@@ -12,12 +15,31 @@ import pandas as pd
 
 def render(db):
     """主入口函式（供 main.py 動態載入使用）"""
-    render_tracking_page()
+    render_tracking_page(db)
 
-def render_tracking_page():
-    """渲染繳費追蹤頁面"""
+def render_tracking_page(db):
+    """渲染繳費追蹤頁面 - v2.0 整合版"""
     st.title("📋 繳費追蹤")
     
+    # === 建立 Tabs ===
+    tab1, tab2, tab3 = st.tabs(["🏠 租金追蹤", "⚡ 電費追蹤", "📊 綜合追蹤"])
+    
+    # === Tab 1: 租金追蹤（保留原功能）===
+    with tab1:
+        render_rent_tracking()
+    
+    # === Tab 2: 電費追蹤（新功能）===
+    with tab2:
+        render_electricity_tracking(db)
+    
+    # === Tab 3: 綜合追蹤（整合視圖）===
+    with tab3:
+        render_combined_tracking(db)
+
+
+# ==================== Tab 1: 租金追蹤（原功能保留）====================
+def render_rent_tracking():
+    """租金追蹤（原有功能）"""
     service = PaymentService()
     
     # === 快速篩選按鈕 ===
@@ -26,30 +48,30 @@ def render_tracking_page():
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        if st.button("🚨 逾期未繳", width="stretch", type="primary"):
-            st.session_state.tracking_filter = "overdue"
+        if st.button("🚨 逾期未繳", key="rent_overdue", use_container_width=True, type="primary"):
+            st.session_state.rent_filter = "overdue"
             st.rerun()
     
     with col2:
-        if st.button("⚠️ 即將到期", use_container_width=True):
-            st.session_state.tracking_filter = "upcoming"
+        if st.button("⚠️ 即將到期", key="rent_upcoming", use_container_width=True):
+            st.session_state.rent_filter = "upcoming"
             st.rerun()
     
     with col3:
-        if st.button("⏳ 全部未繳", use_container_width=True):
-            st.session_state.tracking_filter = "unpaid"
+        if st.button("⏳ 全部未繳", key="rent_unpaid", use_container_width=True):
+            st.session_state.rent_filter = "unpaid"
             st.rerun()
     
     with col4:
-        if st.button("🔄 重置", use_container_width=True):
-            st.session_state.tracking_filter = "all"
+        if st.button("🔄 重置", key="rent_reset", use_container_width=True):
+            st.session_state.rent_filter = "all"
             st.rerun()
     
     # 取得當前篩選狀態
-    if 'tracking_filter' not in st.session_state:
-        st.session_state.tracking_filter = "all"
+    if 'rent_filter' not in st.session_state:
+        st.session_state.rent_filter = "all"
     
-    current_filter = st.session_state.tracking_filter
+    current_filter = st.session_state.rent_filter
     
     st.divider()
     
@@ -64,7 +86,8 @@ def render_tracking_page():
             "🏠 房號篩選（可多選）",
             options=room_list,
             default=[],
-            help="選擇一個或多個房間，留空則顯示全部"
+            help="選擇一個或多個房間，留空則顯示全部",
+            key="rent_room_filter"
         )
     except Exception as e:
         st.error(f"❌ 載入房間列表失敗: {str(e)}")
@@ -187,13 +210,13 @@ def render_tracking_page():
             
             with col1:
                 # 初始化 session state
-                if 'selected_tracking' not in st.session_state:
-                    st.session_state.selected_tracking = []
+                if 'selected_rent' not in st.session_state:
+                    st.session_state.selected_rent = []
                 
                 selected_ids = st.multiselect(
                     "選擇要標記為已繳的項目（可多選）",
                     options=unpaid_df['id'].tolist(),
-                    default=st.session_state.selected_tracking,
+                    default=st.session_state.selected_rent,
                     format_func=lambda x: (
                         f"{unpaid_df[unpaid_df['id']==x]['room_number'].values[0]} - "
                         f"{unpaid_df[unpaid_df['id']==x]['tenant_name'].values[0]} "
@@ -201,10 +224,10 @@ def render_tracking_page():
                         f"{unpaid_df[unpaid_df['id']==x]['payment_month'].values[0]:02d}) "
                         f"${unpaid_df[unpaid_df['id']==x]['amount'].values[0]:,.0f}"
                     ),
-                    key="tracking_multiselect"
+                    key="rent_multiselect"
                 )
                 
-                st.session_state.selected_tracking = selected_ids
+                st.session_state.selected_rent = selected_ids
             
             with col2:
                 paid_amount = st.number_input(
@@ -212,7 +235,7 @@ def render_tracking_page():
                     min_value=0.0,
                     step=100.0,
                     help="留空則使用應繳金額",
-                    key="tracking_paid_amount"
+                    key="rent_paid_amount"
                 )
             
             with col3:
@@ -223,13 +246,13 @@ def render_tracking_page():
             col_btn1, col_btn2, col_btn3 = st.columns(3)
             
             with col_btn1:
-                if st.button("📌 全選", use_container_width=True, key="tracking_select_all"):
-                    st.session_state.selected_tracking = unpaid_df['id'].tolist()
+                if st.button("📌 全選", use_container_width=True, key="rent_select_all"):
+                    st.session_state.selected_rent = unpaid_df['id'].tolist()
                     st.rerun()
             
             with col_btn2:
-                if st.button("🔄 清除", use_container_width=True, key="tracking_clear"):
-                    st.session_state.selected_tracking = []
+                if st.button("🔄 清除", use_container_width=True, key="rent_clear"):
+                    st.session_state.selected_rent = []
                     st.rerun()
             
             # 標記按鈕
@@ -239,7 +262,7 @@ def render_tracking_page():
                     type="primary",
                     disabled=len(selected_ids) == 0,
                     use_container_width=True,
-                    key="tracking_mark_paid"
+                    key="rent_mark_paid"
                 ):
                     with st.spinner("處理中..."):
                         try:
@@ -250,7 +273,7 @@ def render_tracking_page():
                             
                             if results['success'] > 0:
                                 st.success(f"✅ 成功標記 {results['success']} 筆")
-                                st.session_state.selected_tracking = []
+                                st.session_state.selected_rent = []
                                 st.rerun()
                             
                             if results['failed'] > 0:
@@ -261,10 +284,380 @@ def render_tracking_page():
     
     except Exception as e:
         st.error(f"❌ 載入資料失敗: {str(e)}")
-        logger.error(f"追蹤頁面錯誤: {str(e)}", exc_info=True)
+        logger.error(f"租金追蹤錯誤: {str(e)}", exc_info=True)
+
+
+# ==================== Tab 2: 電費追蹤（新功能）====================
+def render_electricity_tracking(db):
+    """電費追蹤（新功能）- v2.0"""
+    
+    st.subheader("⚡ 電費繳費追蹤")
+    
+    # === 快速篩選按鈕 ===
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        if st.button("⏳ 未繳電費", key="elec_unpaid", use_container_width=True, type="primary"):
+            st.session_state.elec_filter = "unpaid"
+            st.rerun()
+    
+    with col2:
+        if st.button("✅ 已繳電費", key="elec_paid", use_container_width=True):
+            st.session_state.elec_filter = "paid"
+            st.rerun()
+    
+    with col3:
+        if st.button("📜 全部電費", key="elec_all", use_container_width=True):
+            st.session_state.elec_filter = "all"
+            st.rerun()
+    
+    with col4:
+        if st.button("🔄 重置", key="elec_reset", use_container_width=True):
+            st.session_state.elec_filter = "unpaid"
+            st.rerun()
+    
+    if 'elec_filter' not in st.session_state:
+        st.session_state.elec_filter = "unpaid"
+    
+    current_filter = st.session_state.elec_filter
+    
+    st.divider()
+    
+    # === 選擇計費期間 ===
+    periods = db.get_all_periods()
+    
+    if not periods:
+        st.warning("⚠️ 尚未建立電費計費期間，請前往「⚡ 電費管理」建立")
+        return
+    
+    # 期間選擇
+    period_options = {
+        f"{p['period_year']}/{p['period_month_start']}-{p['period_month_end']} (ID: {p['id']})": p['id']
+        for p in periods
+    }
+    
+    selected_period = st.selectbox(
+        "📅 選擇計費期間",
+        options=list(period_options.keys()),
+        key="elec_period_select"
+    )
+    
+    if not selected_period:
+        return
+    
+    period_id = period_options[selected_period]
+    st.info(f"📅 當前期間 ID: {period_id}")
+    
+    # === 房號篩選 ===
+    try:
+        tenant_repo = TenantRepository()
+        tenants = tenant_repo.get_active_tenants()
+        room_list = sorted(set([t['room_number'] for t in tenants]))
+        
+        selected_rooms = st.multiselect(
+            "🏠 房號篩選（可多選）",
+            options=room_list,
+            default=[],
+            help="選擇一個或多個房間，留空則顯示全部",
+            key="elec_room_filter"
+        )
+    except Exception as e:
+        st.error(f"❌ 載入房間列表失敗: {str(e)}")
+        selected_rooms = []
+    
+    st.divider()
+    
+    # === 載入電費記錄 ===
+    try:
+        with st.spinner("正在載入電費記錄..."):
+            df = db.get_electricity_payment_record(period_id)
+            
+            if df is None or df.empty:
+                st.warning(f"📭 期間 ID {period_id} 尚無電費記錄，請前往「⚡ 電費管理」完成計算並儲存")
+                return
+            
+            # 根據篩選條件過濾
+            if current_filter == "unpaid":
+                df = df[df['繳費狀態'] == '⏳ 未繳']
+                st.info(f"📊 顯示：未繳電費（共 {len(df)} 筆）")
+            
+            elif current_filter == "paid":
+                df = df[df['繳費狀態'] == '✅ 已繳']
+                st.info(f"📊 顯示：已繳電費（共 {len(df)} 筆）")
+            
+            else:
+                st.info(f"📊 顯示：全部電費（共 {len(df)} 筆）")
+            
+            # 根據房號篩選
+            if selected_rooms:
+                df = df[df['房號'].isin(selected_rooms)]
+                st.caption(f"🔎 已篩選房號：{', '.join(selected_rooms)}")
+            
+            if df.empty:
+                st.success("✅ 沒有符合條件的記錄")
+                return
+            
+            # === 統計摘要 ===
+            col1, col2, col3, col4 = st.columns(4)
+            
+            # 提取金額（移除 $ 和逗號）
+            def extract_amount(amount_str):
+                try:
+                    return float(str(amount_str).replace('$', '').replace(',', '').replace(' ', ''))
+                except:
+                    return 0
+            
+            df['應繳金額_數值'] = df['應繳金額'].apply(extract_amount)
+            df['已繳金額_數值'] = df['已繳金額'].apply(extract_amount)
+            
+            with col1:
+                unpaid_count = len(df[df['繳費狀態'] == '⏳ 未繳'])
+                st.metric("待繳款", f"{unpaid_count} 筆")
+            
+            with col2:
+                paid_count = len(df[df['繳費狀態'] == '✅ 已繳'])
+                st.metric("已繳", f"{paid_count} 筆")
+            
+            with col3:
+                total_due = df['應繳金額_數值'].sum()
+                st.metric("應收總額", f"${total_due:,.0f}")
+            
+            with col4:
+                total_paid = df['已繳金額_數值'].sum()
+                st.metric("已收金額", f"${total_paid:,.0f}")
+            
+            st.divider()
+            
+            # === 顯示表格 ===
+            st.subheader("📋 電費明細")
+            
+            st.dataframe(
+                df[[
+                    '房號', '類型', '使用度數', '公用分攤', '總度數', 
+                    '單價', '應繳金額', '已繳金額', '繳費狀態', '繳費日期'
+                ]],
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            # === 快速標記功能 ===
+            unpaid_df = df[df['繳費狀態'] == '⏳ 未繳']
+            
+            if not unpaid_df.empty:
+                st.divider()
+                st.subheader("⚡ 快速標記已繳")
+                
+                st.caption("💡 點擊房間旁的「✅」按鈕，即可快速更新繳費狀態")
+                
+                # 建立選擇列表
+                for idx, row in unpaid_df.iterrows():
+                    col_info, col_btn = st.columns([4, 1])
+                    
+                    with col_info:
+                        amount = row['應繳金額_數值']
+                        st.write(f"**{row['房號']}** | {row['類型']} | {row['總度數']} 度 | ${amount:,.0f} 元")
+                    
+                    with col_btn:
+                        if st.button("✅", key=f"elec_pay_{period_id}_{idx}"):
+                            with st.spinner(f"正在標記 {row['房號']}..."):
+                                try:
+                                    ok, msg = db.update_electricity_payment(
+                                        period_id,
+                                        row['房號'],
+                                        'paid',
+                                        int(amount),
+                                        date.today().isoformat()
+                                    )
+                                    
+                                    if ok:
+                                        st.success(f"✅ {row['房號']} 已標記為已繳")
+                                        logger.info(f"電費標記成功: {row['房號']} - ${amount:,.0f}")
+                                        st.rerun()
+                                    else:
+                                        st.error(f"❌ 標記失敗: {msg}")
+                                        logger.error(f"電費標記失敗: {row['房號']} - {msg}")
+                                
+                                except Exception as e:
+                                    st.error(f"❌ 標記時發生錯誤: {str(e)}")
+                                    logger.error(f"電費標記異常: {str(e)}", exc_info=True)
+            
+            else:
+                st.success("✅ 全部已繳清")
+    
+    except Exception as e:
+        st.error(f"❌ 載入電費記錄失敗: {str(e)}")
+        logger.error(f"電費追蹤錯誤: {str(e)}", exc_info=True)
+
+
+# ==================== Tab 3: 綜合追蹤（整合視圖）====================
+def render_combined_tracking(db):
+    """綜合追蹤（租金 + 電費整合視圖）- v2.0"""
+    
+    st.subheader("📊 綜合繳費追蹤")
+    st.caption("💡 查看租金與電費的整體繳費狀況")
+    
+    st.divider()
+    
+    # === 載入租金數據 ===
+    try:
+        service = PaymentService()
+        rent_unpaid = service.get_unpaid_payments()
+        rent_df = pd.DataFrame(rent_unpaid) if rent_unpaid else pd.DataFrame()
+        
+        rent_total = rent_df['amount'].sum() if not rent_df.empty else 0
+        rent_count = len(rent_df)
+    
+    except Exception as e:
+        st.error(f"❌ 載入租金數據失敗: {str(e)}")
+        rent_total = 0
+        rent_count = 0
+        rent_df = pd.DataFrame()
+    
+    # === 載入電費數據 ===
+    try:
+        periods = db.get_all_periods()
+        
+        if periods:
+            # 取最新期間
+            latest_period = periods[0]
+            period_id = latest_period['id']
+            
+            st.info(f"📅 電費期間: {latest_period['period_year']}/{latest_period['period_month_start']}-{latest_period['period_month_end']}")
+            
+            elec_df = db.get_electricity_payment_record(period_id)
+            
+            if elec_df is not None and not elec_df.empty:
+                # 提取金額
+                def extract_amount(amount_str):
+                    try:
+                        return float(str(amount_str).replace('$', '').replace(',', '').replace(' ', ''))
+                    except:
+                        return 0
+                
+                elec_df['應繳金額_數值'] = elec_df['應繳金額'].apply(extract_amount)
+                elec_unpaid_df = elec_df[elec_df['繳費狀態'] == '⏳ 未繳']
+                
+                elec_total = elec_unpaid_df['應繳金額_數值'].sum()
+                elec_count = len(elec_unpaid_df)
+            else:
+                elec_total = 0
+                elec_count = 0
+                elec_unpaid_df = pd.DataFrame()
+        else:
+            st.warning("⚠️ 尚未建立電費期間")
+            elec_total = 0
+            elec_count = 0
+            elec_unpaid_df = pd.DataFrame()
+    
+    except Exception as e:
+        st.error(f"❌ 載入電費數據失敗: {str(e)}")
+        elec_total = 0
+        elec_count = 0
+        elec_unpaid_df = pd.DataFrame()
+    
+    # === 整體統計 ===
+    st.markdown("### 💰 整體待收摘要")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric(
+            "🏠 租金待收",
+            f"${rent_total:,.0f}",
+            delta=f"{rent_count} 筆"
+        )
+    
+    with col2:
+        st.metric(
+            "⚡ 電費待收",
+            f"${elec_total:,.0f}",
+            delta=f"{elec_count} 筆"
+        )
+    
+    with col3:
+        total_amount = rent_total + elec_total
+        st.metric(
+            "💵 總待收金額",
+            f"${total_amount:,.0f}",
+            delta=f"{rent_count + elec_count} 筆"
+        )
+    
+    with col4:
+        total_items = rent_count + elec_count
+        st.metric(
+            "📊 收繳概況",
+            f"{total_items} 筆待繳"
+        )
+    
+    st.divider()
+    
+    # === 分類明細 ===
+    col_rent, col_elec = st.columns(2)
+    
+    with col_rent:
+        st.markdown("#### 🏠 租金明細（未繳）")
+        
+        if not rent_df.empty:
+            # 只顯示關鍵欄位
+            display_df = rent_df[['room_number', 'tenant_name', 'payment_year', 'payment_month', 'amount']].copy()
+            display_df['payment_period'] = display_df.apply(
+                lambda row: f"{row['payment_year']}/{row['payment_month']:02d}",
+                axis=1
+            )
+            
+            st.dataframe(
+                display_df[['room_number', 'tenant_name', 'payment_period', 'amount']].rename(columns={
+                    'room_number': '房號',
+                    'tenant_name': '房客',
+                    'payment_period': '期間',
+                    'amount': '金額'
+                }),
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.success("✅ 全部已繳清")
+    
+    with col_elec:
+        st.markdown("#### ⚡ 電費明細（未繳）")
+        
+        if elec_count > 0:
+            st.dataframe(
+                elec_unpaid_df[['房號', '類型', '總度數', '應繳金額']],
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.success("✅ 全部已繳清")
+    
+    st.divider()
+    
+    # === 快速操作提示 ===
+    st.markdown("### 🚀 快速操作")
+    
+    col_hint1, col_hint2 = st.columns(2)
+    
+    with col_hint1:
+        st.info("""
+**📝 標記租金已繳：**
+1. 前往「🏠 租金追蹤」Tab
+2. 使用快速篩選找到未繳項目
+3. 勾選項目後點擊「✅ 標記」
+        """)
+    
+    with col_hint2:
+        st.info("""
+**⚡ 標記電費已繳：**
+1. 前往「⚡ 電費追蹤」Tab
+2. 選擇計費期間
+3. 點擊房間旁的「✅」按鈕快速標記
+        """)
+
 
 # ============================================
 # 本機測試入口
 # ============================================
 if __name__ == "__main__":
-    render_tracking_page()
+    from services.db import get_db
+    db = get_db()
+    render_tracking_page(db)
