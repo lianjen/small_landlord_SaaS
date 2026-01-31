@@ -1,8 +1,8 @@
 """
-数据库操作模块 - v2.9 最终修复版
-✅ 修复电费表名：electricity_records/electricity_readings/electricity_periods
-✅ 修复欄位对齐：DataFrame columns 与 UI 完全一致
-✅ 添加 snake_case 别名：兼容 views/electricity.py
+数据库操作模块 - v3.0 完整修复版
+✅ 修复电费表结构：匹配 Supabase 实际欄位（移除 floor/unit_price/previous_reading/current_reading）
+✅ 修复储存逻辑：electricity_records + electricity_readings 分离储存
+✅ 修复查询逻辑：LEFT JOIN electricity_readings 获取读数
 ✅ 加强 logging 和错误处理
 """
 
@@ -152,7 +152,7 @@ class DatabaseConnectionPool:
 
 # ============== 主数据库类 ==============
 class SupabaseDB:
-    """Supabase 数据库操作 - v2.9 最终修复版"""
+    """Supabase 数据库操作 - v3.0 完整修复版"""
     
     def __init__(self):
         self.pool = DatabaseConnectionPool()
@@ -351,7 +351,7 @@ class SupabaseDB:
             logger.error(f"❌ 删除失败: {str(e)}")
             return False, f"删除失败: {str(e)[:100]}"
     
-    # ==================== 租金管理 ====================
+    # ==================== 租金管理 ==================== 
     
     def get_payment_schedule(
         self, year: Optional[int] = None, month: Optional[int] = None,
@@ -750,11 +750,11 @@ class SupabaseDB:
         
         return self.retry_on_failure(query)
     
-    # ==================== 电费管理 (v2.9 最终修复版) ====================
+    # ==================== 电费管理 (v3.0 完整修复版) ====================
     
-    def getlatestmeterreading(self, room: str, period_id: int) -> Optional[float]:
+    def get_latest_meter_reading(self, room: str, period_id: int) -> Optional[float]:
         """
-        取得最新电表读数 - v2.9 修复版
+        取得最新电表读数 - v3.0
         
         Args:
             room: 房号
@@ -767,7 +767,6 @@ class SupabaseDB:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
-                # ✅ 修复：表名改成 electricity_readings
                 cursor.execute(
                     """
                     SELECT current_reading 
@@ -790,7 +789,7 @@ class SupabaseDB:
             logger.error(f"❌ 查询失败: {str(e)}")
             return None
     
-    def saveelectricityreading(
+    def save_electricity_reading(
         self, 
         period_id: int, 
         room: str, 
@@ -799,7 +798,7 @@ class SupabaseDB:
         kwh_used: float
     ) -> Tuple[bool, str]:
         """
-        储存电表读数 - v2.9 修复版
+        储存电表读数 - v3.0
         
         Args:
             period_id: 期间 ID
@@ -815,7 +814,6 @@ class SupabaseDB:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
-                # ✅ 修复：表名改成 electricity_readings
                 cursor.execute(
                     """
                     INSERT INTO electricity_readings 
@@ -824,7 +822,8 @@ class SupabaseDB:
                     ON CONFLICT (period_id, room_number) DO UPDATE SET
                         previous_reading = EXCLUDED.previous_reading,
                         current_reading = EXCLUDED.current_reading,
-                        kwh_used = EXCLUDED.kwh_used
+                        kwh_used = EXCLUDED.kwh_used,
+                        updated_at = NOW()
                     """,
                     (period_id, room, previous, current, kwh_used)
                 )
@@ -838,9 +837,9 @@ class SupabaseDB:
             logger.error(f"❌ 储存失败: {str(e)}")
             return False, str(e)
     
-    def addelectricityperiod(self, year: int, month_start: int, month_end: int) -> Tuple[bool, str, Optional[int]]:
+    def add_electricity_period(self, year: int, month_start: int, month_end: int) -> Tuple[bool, str, Optional[int]]:
         """
-        新增电费期间 - v2.9 修复版
+        新增电费期间 - v3.0
         
         Args:
             year: 年份
@@ -854,7 +853,6 @@ class SupabaseDB:
             with self.get_connection() as conn:
                 cur = conn.cursor()
                 
-                # ✅ 修复：表名改成 electricity_periods
                 cur.execute(
                     """
                     INSERT INTO electricity_periods 
@@ -876,9 +874,9 @@ class SupabaseDB:
             logger.error(f"❌ 建立失败: {str(e)}")
             return False, str(e), None
     
-    def getallperiods(self) -> List[Dict]:
+    def get_all_periods(self) -> List[Dict]:
         """
-        取得所有期间 - v2.9 修复版
+        取得所有期间 - v3.0
         
         Returns:
             期间列表 (List[Dict])
@@ -887,7 +885,6 @@ class SupabaseDB:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
-                # ✅ 修复：表名改成 electricity_periods
                 cursor.execute(
                     """
                     SELECT id, period_year, period_month_start, period_month_end, created_at
@@ -917,9 +914,9 @@ class SupabaseDB:
             logger.error(f"❌ 查询失败: {str(e)}")
             return []
     
-    def deleteelectricityperiod(self, period_id: int) -> Tuple[bool, str]:
+    def delete_electricity_period(self, period_id: int) -> Tuple[bool, str]:
         """
-        删除期间 - v2.9 修复版
+        删除期间 - v3.0
         
         Args:
             period_id: 期间 ID
@@ -931,7 +928,6 @@ class SupabaseDB:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
-                # ✅ 修复：表名改成 electricity_periods
                 cursor.execute(
                     "DELETE FROM electricity_periods WHERE id = %s",
                     (period_id,)
@@ -946,15 +942,22 @@ class SupabaseDB:
             logger.error(f"❌ 删除失败: {str(e)}")
             return False, str(e)
     
-    def saveelectricityrecord(self, period_id: int, calc_results: list) -> Tuple[bool, str]:
+    def save_electricity_record(self, period_id: int, calc_results: list) -> Tuple[bool, str]:
         """
-        储存电费计算结果 - v2.9 修复版
+        储存电费计算结果 - v3.0 完整修复版（匹配 Supabase 实际表结构）
+        
+        ✅ 实际表结构 (electricity_records)：
+        - id, period_id, room_number, room_type
+        - usage_kwh, public_share_kwh, total_kwh
+        - amount_due, paid_amount, payment_status, payment_date
+        - notes, created_at, updated_at
+        
+        ❌ 不存在的欄位：
+        - floor, unit_price, previous_reading, current_reading
         
         Args:
             period_id: 期间 ID
             calc_results: 计算结果列表
-                - 必须包含：'房号', '楼层', '类型', '使用度数', '公用分摊', '总度数', '单价', '应缴金额'
-                - 选择性包含：'previous_reading', 'current_reading'
         
         Returns:
             (bool, str): 成功/失败訊息
@@ -963,20 +966,26 @@ class SupabaseDB:
             cursor = conn.cursor()
             try:
                 # 1. 先删除该期间的旧记录（避免重复）
-                # ✅ 修复：表名改成 electricity_records
                 cursor.execute(
                     "DELETE FROM electricity_records WHERE period_id = %s",
                     (period_id,)
                 )
                 deleted_count = cursor.rowcount
                 if deleted_count > 0:
-                    logger.info(f"已删除 {deleted_count} 笔旧记录")
+                    logger.info(f"已删除 {deleted_count} 笔旧记录 (period_id={period_id})")
                 
                 success_count = 0
                 for result in calc_results:
+                    # 萃取数据（支持繁体/简体双字段）
+                    room_number = result.get('房号', result.get('房號', ''))
+                    room_type = result.get('类型', result.get('類型', ''))
+                    usage_kwh = float(result.get('使用度数', result.get('使用度數', 0)))
+                    public_share_kwh = float(result.get('公用分摊', result.get('公用分攤', 0)))
+                    total_kwh = float(result.get('总度数', result.get('總度數', 0)))
+                    amount_due = int(result.get('应缴金额', result.get('應繳金額', 0)))
+                    
                     # 1.1 更新读数表（如果有提供 previous_reading/current_reading）
                     if 'previous_reading' in result and 'current_reading' in result:
-                        # ✅ 修复：表名改成 electricity_readings
                         cursor.execute(
                             """
                             INSERT INTO electricity_readings 
@@ -985,58 +994,51 @@ class SupabaseDB:
                             ON CONFLICT (period_id, room_number) DO UPDATE SET
                                 previous_reading = EXCLUDED.previous_reading,
                                 current_reading = EXCLUDED.current_reading,
-                                kwh_used = EXCLUDED.kwh_used
+                                kwh_used = EXCLUDED.kwh_used,
+                                updated_at = NOW()
                             """,
                             (
                                 period_id,
-                                result['房号'],
+                                room_number,
                                 result['previous_reading'],
                                 result['current_reading'],
-                                result['使用度数']
+                                usage_kwh
                             )
                         )
                     
-                    # 1.2 插入计费记录
-                    # ✅ 修复：表名改成 electricity_records
+                    # 1.2 插入计费记录（✅ 只插入表里实际存在的欄位）
                     cursor.execute(
                         """
                         INSERT INTO electricity_records 
-                        (period_id, room_number, floor, room_type, previous_reading, current_reading,
-                         usage_kwh, public_share_kwh, total_kwh, unit_price, amount_due, 
-                         payment_status, paid_amount, payment_date)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        (period_id, room_number, room_type, 
+                         usage_kwh, public_share_kwh, total_kwh, 
+                         amount_due, paid_amount, payment_status, payment_date)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (period_id, room_number) DO UPDATE SET
-                            floor = EXCLUDED.floor,
                             room_type = EXCLUDED.room_type,
-                            previous_reading = EXCLUDED.previous_reading,
-                            current_reading = EXCLUDED.current_reading,
                             usage_kwh = EXCLUDED.usage_kwh,
                             public_share_kwh = EXCLUDED.public_share_kwh,
                             total_kwh = EXCLUDED.total_kwh,
-                            unit_price = EXCLUDED.unit_price,
-                            amount_due = EXCLUDED.amount_due
+                            amount_due = EXCLUDED.amount_due,
+                            updated_at = NOW()
                         """,
                         (
                             period_id,
-                            result['房号'],
-                            result['楼层'],
-                            result['类型'],
-                            result.get('previous_reading', 0),
-                            result.get('current_reading', 0),
-                            result['使用度数'],
-                            result['公用分摊'],
-                            result['总度数'],
-                            result['单价'],
-                            result['应缴金额'],
-                            'unpaid',
-                            0,
-                            None
+                            room_number,
+                            room_type,
+                            usage_kwh,
+                            public_share_kwh,
+                            total_kwh,
+                            amount_due,
+                            0,  # paid_amount 默认 0
+                            'unpaid',  # payment_status 默认 unpaid
+                            None  # payment_date 默认 NULL
                         )
                     )
                     success_count += 1
                 
                 log_db_operation("INSERT", "electricity_records", True, success_count)
-                logger.info(f"✅ 成功储存 {success_count} 笔计费记录")
+                logger.info(f"✅ 成功储存 {success_count} 笔计费记录 (period_id={period_id})")
                 return True, f"✅ 已储存 {success_count} 笔计费记录"
             
             except Exception as e:
@@ -1044,50 +1046,45 @@ class SupabaseDB:
                 logger.error(f"❌ 储存失败: {str(e)}")
                 return False, str(e)
     
-    def getelectricitypaymentrecord(self, period_id: int) -> pd.DataFrame:
+    def get_electricity_payment_record(self, period_id: int) -> pd.DataFrame:
         """
-        查询电费缴费记录 - v2.9 修复版
+        查询电费缴费记录 - v3.0 完整修复版（匹配 Supabase 实际表结构）
+        
+        ✅ 从 electricity_records 表查询，LEFT JOIN electricity_readings 获取读数
         
         Args:
             period_id: 期间 ID
         
         Returns:
-            pd.DataFrame: 缴费记录（欄位名与 UI 对齐）
+            pd.DataFrame: 缴费记录（繁体欄位名，用于 UI 显示）
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
-                # ✅ 修复：表名改成 electricity_records，欄位名对齐 UI
+                # ✅ 修复：LEFT JOIN electricity_readings 获取读数
                 cursor.execute(
                     """
                     SELECT 
-                        room_number,
-                        floor,
-                        room_type,
-                        previous_reading,
-                        current_reading,
-                        usage_kwh,
-                        public_share_kwh,
-                        total_kwh,
-                        unit_price,
-                        amount_due,
-                        paid_amount,
-                        payment_status,
-                        payment_date,
-                        notes,
-                        updated_at
-                    FROM electricity_records
-                    WHERE period_id = %s
-                    ORDER BY 
-                        CASE floor 
-                            WHEN '1F' THEN 1 
-                            WHEN '2F' THEN 2 
-                            WHEN '3F' THEN 3 
-                            WHEN '4F' THEN 4 
-                            ELSE 5 
-                        END,
-                        room_number
+                        er.room_number,
+                        er.room_type,
+                        COALESCE(er_read.previous_reading, 0) as previous_reading,
+                        COALESCE(er_read.current_reading, 0) as current_reading,
+                        er.usage_kwh,
+                        er.public_share_kwh,
+                        er.total_kwh,
+                        er.amount_due,
+                        er.paid_amount,
+                        er.payment_status,
+                        er.payment_date,
+                        er.notes,
+                        er.updated_at
+                    FROM electricity_records er
+                    LEFT JOIN electricity_readings er_read 
+                        ON er.period_id = er_read.period_id 
+                        AND er.room_number = er_read.room_number
+                    WHERE er.period_id = %s
+                    ORDER BY er.room_number
                     """,
                     (period_id,)
                 )
@@ -1098,29 +1095,31 @@ class SupabaseDB:
                     logger.warning(f"⚠️ period_id={period_id} 没有记录")
                     return pd.DataFrame()
                 
-                # 组装 DataFrame（欄位名与 UI 严格对齐）
+                # 组装 DataFrame（繁体欄位名，用于 UI 显示）
                 data = []
                 for row in rows:
+                    # 计算单价（反推：amount_due / total_kwh）
+                    unit_price = round(row[7] / row[6], 2) if row[6] > 0 else 0
+                    
                     data.append({
-                        '房号': row[0],
-                        '楼层': row[1],
-                        '类型': row[2],
-                        '上期读数': row[3],
-                        '本期读数': row[4],
-                        '使用度数': row[5],
-                        '公用分摊': row[6],
-                        '总度数': row[7],
-                        '单价': f"{row[8]:.2f}" if row[8] else "-",
-                        '应缴金额': f"${row[9]:,}" if row[9] else "$0",
-                        '已缴金额': f"${row[10]:,}" if row[10] else "$0",
-                        '缴费状态': '✅ 已缴' if row[11] == 'paid' else '⏳ 未缴',
-                        '缴费日期': row[12].strftime('%Y-%m-%d') if row[12] else "-",
-                        '备注': row[13] or "-",
-                        '更新时间': row[14].strftime('%Y-%m-%d %H:%M') if row[14] else "-"
+                        '房號': row[0],
+                        '類型': row[1] or '-',
+                        '上期讀數': f"{row[2]:.1f}" if row[2] else "-",
+                        '本期讀數': f"{row[3]:.1f}" if row[3] else "-",
+                        '使用度數': f"{row[4]:.1f}" if row[4] else "-",
+                        '公用分攤': f"{row[5]:.1f}" if row[5] else "-",
+                        '總度數': f"{row[6]:.1f}" if row[6] else "-",
+                        '單價': f"${unit_price:.2f}",
+                        '應繳金額': f"${row[7]:,}" if row[7] else "$0",
+                        '已繳金額': f"${row[8]:,}" if row[8] else "$0",
+                        '繳費狀態': '✅ 已繳' if row[9] == 'paid' else '⏳ 未繳',
+                        '繳費日期': row[10].strftime('%Y-%m-%d') if row[10] else "-",
+                        '備註': row[11] or "-",
+                        '更新時間': row[12].strftime('%Y-%m-%d %H:%M') if row[12] else "-"
                     })
                 
                 log_db_operation("SELECT", "electricity_records", True, len(data))
-                logger.info(f"✅ 查询到 {len(data)} 笔记录")
+                logger.info(f"✅ 查询到 {len(data)} 笔记录 (period_id={period_id})")
                 
                 return pd.DataFrame(data)
         
@@ -1129,7 +1128,7 @@ class SupabaseDB:
             logger.error(f"❌ 查询失败: {str(e)}")
             return pd.DataFrame()
     
-    def updateelectricitypayment(
+    def update_electricity_payment(
         self, 
         period_id: int, 
         room_number: str, 
@@ -1139,7 +1138,7 @@ class SupabaseDB:
         notes: str = ""
     ) -> Tuple[bool, str]:
         """
-        更新电费缴费状态 - v2.9 修复版
+        更新电费缴费状态 - v3.0 完整修复版
         
         Args:
             period_id: 期间 ID
@@ -1156,7 +1155,6 @@ class SupabaseDB:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
-                # ✅ 修复：表名改成 electricity_records
                 cursor.execute(
                     """
                     UPDATE electricity_records 
@@ -1164,11 +1162,14 @@ class SupabaseDB:
                         paid_amount = %s,
                         payment_date = %s,
                         notes = %s,
-                        updated_at = CURRENT_TIMESTAMP
+                        updated_at = NOW()
                     WHERE period_id = %s AND room_number = %s
                     """,
                     (payment_status, paid_amount, payment_date, notes, period_id, room_number)
                 )
+                
+                if cursor.rowcount == 0:
+                    return False, f"❌ 未找到记录 (period_id={period_id}, room={room_number})"
                 
                 log_db_operation("UPDATE", "electricity_records", True, 1)
                 logger.info(f"✅ {room_number} - {payment_status}")
@@ -1179,9 +1180,9 @@ class SupabaseDB:
             logger.error(f"❌ 更新失败: {str(e)}")
             return False, str(e)
     
-    def getelectricitypaymentsummary(self, period_id: int) -> dict:
+    def get_electricity_payment_summary(self, period_id: int) -> dict:
         """
-        统计电费缴费摘要 - v2.9 修复版
+        统计电费缴费摘要 - v3.0
         
         Args:
             period_id: 期间 ID
@@ -1193,7 +1194,6 @@ class SupabaseDB:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
-                # ✅ 修复：表名改成 electricity_records
                 cursor.execute(
                     """
                     SELECT 
@@ -1236,44 +1236,17 @@ class SupabaseDB:
             logger.error(f"❌ 统计失败: {str(e)}")
             return {}
     
-    # ==================== Snake_case 别名 (兼容 v2.7 views/electricity.py) ====================
+    # ==================== 兼容性别名 (向后兼容 v2.x) ====================
     
-    def get_all_periods(self):
-        """别名：getallperiods() - 用于 views/electricity.py"""
-        return self.getallperiods()
-    
-    def add_electricity_period(self, year: int, month_start: int, month_end: int):
-        """别名：addelectricityperiod() - 用于 views/electricity.py"""
-        return self.addelectricityperiod(year, month_start, month_end)
-    
-    def delete_electricity_period(self, period_id: int):
-        """别名：deleteelectricityperiod() - 用于 views/electricity.py"""
-        return self.deleteelectricityperiod(period_id)
-    
-    def get_latest_meter_reading(self, room: str, period_id: int):
-        """别名：getlatestmeterreading() - 用于 views/electricity.py"""
-        return self.getlatestmeterreading(room, period_id)
-    
-    def save_electricity_reading(self, period_id: int, room: str, previous: float, current: float, kwh_used: float):
-        """别名：saveelectricityreading() - 用于 views/electricity.py"""
-        return self.saveelectricityreading(period_id, room, previous, current, kwh_used)
-    
-    def save_electricity_record(self, period_id: int, calc_results: list):
-        """别名：saveelectricityrecord() - 用于 views/electricity.py"""
-        return self.saveelectricityrecord(period_id, calc_results)
-    
-    def get_electricity_payment_record(self, period_id: int):
-        """别名：getelectricitypaymentrecord() - 用于 views/electricity.py"""
-        return self.getelectricitypaymentrecord(period_id)
-    
-    def update_electricity_payment(self, period_id: int, room_number: str, payment_status: str, 
-                                   paid_amount: int = 0, payment_date: str = None, notes: str = ""):
-        """别名：updateelectricitypayment() - 用于 views/electricity.py"""
-        return self.updateelectricitypayment(period_id, room_number, payment_status, paid_amount, payment_date, notes)
-    
-    def get_electricity_payment_summary(self, period_id: int):
-        """别名：getelectricitypaymentsummary() - 用于 views/electricity.py"""
-        return self.getelectricitypaymentsummary(period_id)
+    getlatestmeterreading = get_latest_meter_reading
+    saveelectricityreading = save_electricity_reading
+    addelectricityperiod = add_electricity_period
+    getallperiods = get_all_periods
+    deleteelectricityperiod = delete_electricity_period
+    saveelectricityrecord = save_electricity_record
+    getelectricitypaymentrecord = get_electricity_payment_record
+    updateelectricitypayment = update_electricity_payment
+    getelectricitypaymentsummary = get_electricity_payment_summary
 
 
 # ============== Streamlit 缓存 ==============
@@ -1287,7 +1260,7 @@ def get_db() -> SupabaseDB:
 # ============== 测试代码 ==============
 if __name__ == "__main__":
     logger.info("=" * 50)
-    logger.info("services/db.py 测试模式")
+    logger.info("services/db.py 测试模式 - v3.0")
     logger.info("=" * 50)
     
     print("\n" + "=" * 50)
@@ -1309,5 +1282,5 @@ if __name__ == "__main__":
         print(f"❌ 连接池创建失败: {e}")
     
     logger.info("=" * 50)
-    logger.info("services/db.py 测试完成")
+    logger.info("services/db.py 测试完成 - v3.0")
     logger.info("=" * 50 + "\n")
