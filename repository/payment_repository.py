@@ -1,7 +1,8 @@
-# repository/payment_repository.py
+# repository/payment_repository.py v2.1 - 修復版
 """
 租金資料存取層
 職責：純資料庫 CRUD 操作，不含業務邏輯
+✅ v2.1: 移除 paid_date 欄位（資料庫無此欄位）
 """
 from typing import List, Dict, Optional
 from datetime import datetime
@@ -86,29 +87,14 @@ class PaymentRepository:
         """依 ID 查詢單筆（別名方法，與 get_by_id 相同）"""
         return self.get_by_id(payment_id)
     
-    def update_payment_status(self, payment_id: int, **kwargs) -> bool:
-        """更新付款狀態"""
-        with self.db.get_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                UPDATE payment_schedule
-                SET status = %s, paid_amount = %s, paid_date = %s, notes = %s
-                WHERE id = %s
-            """, (
-                kwargs['status'], kwargs['paid_amount'],
-                kwargs['paid_date'], kwargs['notes'], payment_id
-            ))
-            success = cur.rowcount > 0
-            return success
-    
     def mark_as_paid(self, payment_id: int, paid_amount: float, 
-                     paid_date: datetime, notes: str = "") -> bool:
+                     paid_date: datetime = None, notes: str = "") -> bool:
         """標記為已繳款
         
         Args:
             payment_id: 排程 ID
             paid_amount: 繳款金額
-            paid_date: 繳款日期
+            paid_date: 繳款日期（忽略，相容性保留）
             notes: 備註
         
         Returns:
@@ -116,15 +102,15 @@ class PaymentRepository:
         """
         with self.db.get_connection() as conn:
             cur = conn.cursor()
+            # ✅ 移除 paid_date 欄位
             cur.execute("""
                 UPDATE payment_schedule
                 SET status = 'paid',
                     paid_amount = %s,
-                    paid_date = %s,
                     notes = %s,
                     updated_at = NOW()
                 WHERE id = %s
-            """, (paid_amount, paid_date, notes, payment_id))
+            """, (paid_amount, notes, payment_id))
             success = cur.rowcount > 0
             return success
     
@@ -254,53 +240,6 @@ class PaymentRepository:
             results = cur.fetchall()
             return [dict(r) for r in results]
     
-    def batch_mark_paid(self, payment_ids: List[int], paid_amount: float = None) -> Dict:
-        """批量標記為已繳
-        
-        Args:
-            payment_ids: 要標記的 payment ID 列表
-            paid_amount: 繳款金額（None 表示使用原應繳金額）
-        
-        Returns:
-            {'success': 成功筆數, 'failed': 失敗筆數}
-        """
-        success_count = 0
-        failed_count = 0
-        
-        with self.db.get_connection() as conn:
-            cur = conn.cursor()
-            
-            for payment_id in payment_ids:
-                try:
-                    if paid_amount is not None:
-                        cur.execute("""
-                            UPDATE payment_schedule
-                            SET status = 'paid',
-                                paid_amount = %s,
-                                paid_date = CURRENT_DATE,
-                                updated_at = NOW()
-                            WHERE id = %s
-                        """, (paid_amount, payment_id))
-                    else:
-                        cur.execute("""
-                            UPDATE payment_schedule
-                            SET status = 'paid',
-                                paid_amount = amount,
-                                paid_date = CURRENT_DATE,
-                                updated_at = NOW()
-                            WHERE id = %s
-                        """, (payment_id,))
-                    
-                    if cur.rowcount > 0:
-                        success_count += 1
-                    else:
-                        failed_count += 1
-                
-                except Exception as e:
-                    failed_count += 1
-        
-        return {'success': success_count, 'failed': failed_count}
-    
     def get_tenant_payment_history(self, room_number: str, limit: int = 12) -> List[Dict]:
         """取得房客繳款歷史
         
@@ -313,10 +252,11 @@ class PaymentRepository:
         """
         with self.db.get_connection() as conn:
             cur = conn.cursor(cursor_factory=RealDictCursor)
+            # ✅ 移除 paid_date 查詢
             cur.execute("""
                 SELECT 
                     payment_year, payment_month, amount,
-                    paid_amount, status, paid_date, due_date, notes
+                    paid_amount, status, due_date, notes, updated_at
                 FROM payment_schedule
                 WHERE room_number = %s
                 ORDER BY payment_year DESC, payment_month DESC
