@@ -1,7 +1,7 @@
-# repository/payment_repository.py v2.1 - 修復版
+# repository/payment_repository.py v2.1 - 完整修復版
 """
 租金資料存取層
-職責：純資料庫 CRUD 操作，不含業務邏輯
+職責:純資料庫 CRUD 操作，不含業務邏輯
 ✅ v2.1: 移除 paid_date 欄位（資料庫無此欄位）
 """
 from typing import List, Dict, Optional
@@ -94,7 +94,7 @@ class PaymentRepository:
         Args:
             payment_id: 排程 ID
             paid_amount: 繳款金額
-            paid_date: 繳款日期（忽略，相容性保留）
+            paid_date: 繳款日期（保留參數相容性，但不使用）
             notes: 備註
         
         Returns:
@@ -102,7 +102,7 @@ class PaymentRepository:
         """
         with self.db.get_connection() as conn:
             cur = conn.cursor()
-            # ✅ 移除 paid_date 欄位
+            # ✅ 修復：移除 paid_date 欄位
             cur.execute("""
                 UPDATE payment_schedule
                 SET status = 'paid',
@@ -135,7 +135,7 @@ class PaymentRepository:
             return [dict(r) for r in results]
     
     def get_by_room_and_period(self, room_number: str, year: int, month: int) -> List[Dict]:
-        """取得指定房間和期間的租金記錄（新增方法）
+        """取得指定房間和期間的租金記錄
         
         Args:
             room_number: 房號
@@ -179,15 +179,7 @@ class PaymentRepository:
             month: 月份
         
         Returns:
-            包含統計數據的字典：
-            {
-                'total_expected': 應收總額,
-                'total_received': 實收總額,
-                'unpaid_count': 未繳筆數,
-                'paid_count': 已繳筆數,
-                'overdue_count': 逾期筆數,
-                'collection_rate': 收款率 (0-1)
-            }
+            包含統計數據的字典
         """
         with self.db.get_connection() as conn:
             cur = conn.cursor(cursor_factory=RealDictCursor)
@@ -252,11 +244,13 @@ class PaymentRepository:
         """
         with self.db.get_connection() as conn:
             cur = conn.cursor(cursor_factory=RealDictCursor)
-            # ✅ 移除 paid_date 查詢
+            # ✅ 修復：移除 paid_date 欄位查詢
             cur.execute("""
                 SELECT 
+                    id, room_number, tenant_name,
                     payment_year, payment_month, amount,
-                    paid_amount, status, due_date, notes, updated_at
+                    paid_amount, status, due_date, notes, 
+                    updated_at, created_at
                 FROM payment_schedule
                 WHERE room_number = %s
                 ORDER BY payment_year DESC, payment_month DESC
