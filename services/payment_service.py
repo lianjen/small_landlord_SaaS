@@ -1,7 +1,8 @@
-# services/payment_service.py
+# services/payment_service.py v2.1 - 修復版
 """
 租金管理服務層
 職責：租金計算、排程管理、收款追蹤
+✅ v2.1: 修復 None 金額導致的 TypeError
 """
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime, timedelta
@@ -165,7 +166,7 @@ class PaymentService:
         
         return results
     
-    def mark_payment_as_paid(self, payment_id: int, paid_amount: float,
+    def mark_payment_as_paid(self, payment_id: int, paid_amount: Optional[float] = None,
                             paid_date: Optional[datetime] = None,
                             notes: str = "") -> bool:
         """
@@ -173,7 +174,7 @@ class PaymentService:
         
         Args:
             payment_id: 排程 ID
-            paid_amount: 實繳金額
+            paid_amount: 實繳金額（None 表示使用應繳金額）
             paid_date: 繳款日期（預設今天）
             notes: 備註
         
@@ -189,8 +190,17 @@ class PaymentService:
             logger.error(f"找不到排程 ID: {payment_id}")
             return False
         
-        # 2. 檢查金額差異
+        # 2. 處理金額（若未指定則使用應繳金額）
         expected_amount = float(schedule['amount'])
+        
+        # ✅ 修復：當 paid_amount 為 None 時，使用應繳金額
+        if paid_amount is None:
+            paid_amount = expected_amount
+            logger.info(f"未指定繳款金額，使用應繳金額: ${paid_amount}")
+        else:
+            paid_amount = float(paid_amount)
+        
+        # 3. 檢查金額差異
         difference = paid_amount - expected_amount
         
         if abs(difference) > 0.01:
@@ -201,7 +211,7 @@ class PaymentService:
             )
             notes += f" [金額差異: ${difference:+.2f}]"
         
-        # 3. 更新付款狀態
+        # 4. 更新付款狀態
         success = self.payment_repo.mark_as_paid(
             payment_id=payment_id,
             paid_amount=paid_amount,
@@ -218,13 +228,13 @@ class PaymentService:
         
         return success
     
-    def batch_mark_paid(self, payment_ids: List[int], paid_amount: float) -> Dict[str, int]:
+    def batch_mark_paid(self, payment_ids: List[int], paid_amount: Optional[float] = None) -> Dict[str, int]:
         """
         批量標記已繳款
         
         Args:
             payment_ids: 排程 ID 列表
-            paid_amount: 統一繳款金額
+            paid_amount: 統一繳款金額（None 表示各自使用應繳金額）
         
         Returns:
             {'success': 5, 'failed': 1}
@@ -234,6 +244,7 @@ class PaymentService:
         results = {'success': 0, 'failed': 0}
         
         for payment_id in payment_ids:
+            # ✅ 修復：允許 paid_amount 為 None
             if self.mark_payment_as_paid(payment_id, paid_amount):
                 results['success'] += 1
             else:
