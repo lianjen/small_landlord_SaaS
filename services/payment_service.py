@@ -1,8 +1,8 @@
-# services/payment_service.py v2.1 - 修復版
+# services/payment_service.py v2.2 - 完整修復版
 """
 租金管理服務層
 職責：租金計算、排程管理、收款追蹤
-✅ v2.1: 修復 None 金額導致的 TypeError
+✅ v2.2: 修復 None 金額處理 + 移除 paid_date 欄位
 """
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime, timedelta
@@ -175,25 +175,21 @@ class PaymentService:
         Args:
             payment_id: 排程 ID
             paid_amount: 實繳金額（None 表示使用應繳金額）
-            paid_date: 繳款日期（預設今天）
+            paid_date: 繳款日期（保留參數相容性，但不使用）
             notes: 備註
         
         Returns:
             是否成功
         """
-        if paid_date is None:
-            paid_date = datetime.now()
-        
         # 1. 取得原始排程資料
         schedule = self.payment_repo.find_by_id(payment_id)
         if not schedule:
             logger.error(f"找不到排程 ID: {payment_id}")
             return False
         
-        # 2. 處理金額（若未指定則使用應繳金額）
+        # 2. 處理金額（✅ 修復：允許 None）
         expected_amount = float(schedule['amount'])
         
-        # ✅ 修復：當 paid_amount 為 None 時，使用應繳金額
         if paid_amount is None:
             paid_amount = expected_amount
             logger.info(f"未指定繳款金額，使用應繳金額: ${paid_amount}")
@@ -211,11 +207,10 @@ class PaymentService:
             )
             notes += f" [金額差異: ${difference:+.2f}]"
         
-        # 4. 更新付款狀態
+        # 4. 更新付款狀態（✅ 修復：不傳 paid_date）
         success = self.payment_repo.mark_as_paid(
             payment_id=payment_id,
             paid_amount=paid_amount,
-            paid_date=paid_date,
             notes=notes
         )
         
@@ -306,13 +301,7 @@ class PaymentService:
         Returns:
             排程記錄列表
         """
-        query = f"""
-            SELECT * FROM payment_schedule
-            WHERE room_number = %s
-            ORDER BY payment_year DESC, payment_month DESC
-            LIMIT {limit}
-        """
-        return self.payment_repo._execute_query(query, (room_number,))
+        return self.payment_repo.get_tenant_payment_history(room_number, limit)
     
     def calculate_annual_rent_total(self, tenant: Dict) -> Tuple[float, str]:
         """
