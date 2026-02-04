@@ -1,9 +1,7 @@
 """
-数据库操作模块 - v3.1 完整版 (新增电费通知功能)
-✅ 修复电费表结构：匹配 Supabase 实际欄位
-✅ 修复储存逻辑：electricity_records + electricity_readings 分离储存
-✅ 修复查询逻辑：LEFT JOIN electricity_readings 获取读数
-✅ 新增电费通知功能：支持首次通知 + 自动催繳
+数据库操作模块 - v3.2 完整版 (修复 Streamlit rerun 问题 + 自动通知)
+✅ 修复连接池问题：使用 @st.cache_resource 保持单例
+✅ 新增自动通知功能：储存计费后自动发送首次通知
 ✅ 加强 logging 和错误处理
 """
 
@@ -17,6 +15,8 @@ import logging
 from datetime import datetime, date
 from typing import Optional, Tuple, List, Dict
 import time
+import os
+import requests
 
 from services.logger import logger, log_db_operation
 
@@ -93,11 +93,12 @@ def validate_constants():
                 BackupConstants.EXPENSE, BackupConstants.ELECTRICITY)
 
 
-# ============== 连接池管理 ==============
+# ============== 连接池管理 (修复版 v3.2) ==============
 class DatabaseConnectionPool:
-    """单例连接池"""
+    """单例连接池 - 修复 Streamlit rerun 问题"""
     _instance = None
     _pool = None
+    _initialized = False  # ✅ 新增：防止重复初始化
     
     def __new__(cls):
         if cls._instance is None:
@@ -106,13 +107,14 @@ class DatabaseConnectionPool:
     
     def initialize(self, config: dict):
         """
-        初始化连接池
+        初始化连接池 - 只在第一次调用时初始化
         
         Args:
             config: {'host': ..., 'port': ..., 'database': ..., 'user': ..., 'password': ...}
         """
-        if self._pool is not None:
-            logger.warning("连接池已初始化")
+        # ✅ 如果已初始化，直接返回
+        if self._initialized and self._pool is not None:
+            logger.debug("连接池已存在，跳过初始化")
             return
         
         try:
@@ -129,6 +131,7 @@ class DatabaseConnectionPool:
                 password=config.get('password'),
                 connect_timeout=10
             )
+            self._initialized = True  # ✅ 标记已初始化
             logger.info(f"✅ 连接池初始化成功 (min={minconn}, max={maxconn})")
         
         except Exception as e:
@@ -136,32 +139,58 @@ class DatabaseConnectionPool:
             raise
     
     def get_connection(self):
-        if self._pool is None:
-            raise RuntimeError("连接池未初始化")
+        """获取连接 - 添加初始化检查"""
+        if self._pool is None or not self._initialized:
+            raise RuntimeError("连接池未初始化，请先调用 initialize()")
         return self._pool.getconn()
     
     def return_connection(self, conn):
+        """归还连接"""
         if self._pool and conn:
             self._pool.putconn(conn)
     
     def close_all(self):
+        """关闭所有连接 - 通常不需要在 Streamlit 中调用"""
         if self._pool:
             self._pool.closeall()
             self._pool = None
+            self._initialized = False
             logger.info("✅ 连接池已关闭")
+    
+    def is_initialized(self) -> bool:
+        """检查是否已初始化"""
+        return self._initialized and self._pool is not None
 
 
-# ============== 主数据库类 ==============
+# ============== ✨ 使用 Streamlit 缓存创建全局数据库实例 ==============
+@st.cache_resource
+def get_database_instance():
+    """
+    创建并缓存数据库实例 - 使用 Streamlit 的资源缓存
+    
+    ✅ 这样可以确保整个 Streamlit session 只创建一次数据库连接池
+    ✅ 即使页面 rerun，连接池也不会被重复初始化
+    """
+    logger.info("🔄 初始化数据库实例（通过 cache_resource）")
+    return SupabaseDB()
+
+
+# ============== 主数据库类 (修复版 v3.2) ==============
 class SupabaseDB:
-    """Supabase 数据库操作 - v3.1 完整版 (新增电费通知功能)"""
+    """Supabase 数据库操作 - v3.2 完整版 (修复连接池问题 + 自动通知)"""
     
     def __init__(self):
+        """初始化数据库连接"""
         self.pool = DatabaseConnectionPool()
         self.validated_constants = validate_constants()
         
         try:
-            self.pool.initialize(st.secrets.get("supabase", {}))
-            logger.info("✅ SupabaseDB 初始化成功")
+            # ✅ 只在连接池未初始化时才初始化
+            if not self.pool.is_initialized():
+                self.pool.initialize(st.secrets.get("supabase", {}))
+                logger.info("✅ SupabaseDB 初始化成功")
+            else:
+                logger.debug("✅ SupabaseDB 复用现有连接池")
         except Exception as e:
             logger.error(f"❌ SupabaseDB 初始化失败: {e}")
             st.error(f"数据库初始化失败: {e}")
@@ -352,7 +381,7 @@ class SupabaseDB:
             logger.error(f"❌ 删除失败: {str(e)}")
             return False, f"删除失败: {str(e)[:100]}"
     
-    # ==================== 租金管理 ==================== 
+    # ==================== 租金管理 ====================
     
     def get_payment_schedule(
         self, year: Optional[int] = None, month: Optional[int] = None,
@@ -751,11 +780,11 @@ class SupabaseDB:
         
         return self.retry_on_failure(query)
     
-    # ==================== 电费管理 (v3.1 完整版 - 新增通知功能) ====================
+    # ==================== 电费管理 (v3.2 完整版 - 新增自动通知功能) ====================
     
     def get_latest_meter_reading(self, room: str, period_id: int) -> Optional[float]:
         """
-        取得最新电表读数 - v3.1
+        取得最新电表读数 - v3.2
         
         Args:
             room: 房号
@@ -799,7 +828,7 @@ class SupabaseDB:
         kwh_used: float
     ) -> Tuple[bool, str]:
         """
-        储存电表读数 - v3.1
+        储存电表读数 - v3.2
         
         Args:
             period_id: 期间 ID
@@ -840,7 +869,7 @@ class SupabaseDB:
     
     def add_electricity_period(self, year: int, month_start: int, month_end: int) -> Tuple[bool, str, Optional[int]]:
         """
-        新增电费期间 - v3.1
+        新增电费期间 - v3.2
         
         Args:
             year: 年份
@@ -877,7 +906,7 @@ class SupabaseDB:
     
     def get_all_periods(self) -> List[Dict]:
         """
-        取得所有期间 - v3.1
+        取得所有期间 - v3.2
         
         Returns:
             期间列表 (List[Dict])
@@ -919,7 +948,7 @@ class SupabaseDB:
     
     def delete_electricity_period(self, period_id: int) -> Tuple[bool, str]:
         """
-        删除期间 - v3.1
+        删除期间 - v3.2
         
         Args:
             period_id: 期间 ID
@@ -947,7 +976,7 @@ class SupabaseDB:
     
     def update_electricity_period_remind_date(self, period_id: int, remind_date: str) -> Tuple[bool, str]:
         """
-        更新电费期间的自动催繳開始日 - v3.1 新增
+        更新电费期间的自动催繳開始日 - v3.2 新增
         
         Args:
             period_id: 期间 ID
@@ -983,7 +1012,7 @@ class SupabaseDB:
     
     def save_electricity_record(self, period_id: int, calc_results: list) -> Tuple[bool, str]:
         """
-        储存电费计算结果 - v3.1 完整版（增加 tenant_id 和 status 支持通知）
+        储存电费计算结果 - v3.2 完整版（增加 tenant_id 和 status 支持通知）
         
         ✅ 实际表结构 (electricity_records):
         - id, period_id, room_number, room_type, tenant_id, status
@@ -1107,9 +1136,160 @@ class SupabaseDB:
                 logger.error(f"❌ 储存失败: {str(e)}")
                 return False, str(e)
     
+    def trigger_auto_first_notification(self, period_id: int, remind_date: str = None) -> Tuple[bool, str, int]:
+        """
+        ✨ v3.2 新增：自动触发首次通知 - 在保存计费记录后立即调用
+        
+        Args:
+            period_id: 期间 ID
+            remind_date: 催缴开始日期 (可选，如果不提供则默认下月1号)
+        
+        Returns:
+            (bool, str, notified_count): 成功/失败訊息 + 通知数量
+        """
+        try:
+            # 如果没提供催缴日期，自动设为下个月 1 号
+            if not remind_date:
+                today = datetime.now()
+                next_month = today.month + 1 if today.month < 12 else 1
+                next_year = today.year if today.month < 12 else today.year + 1
+                remind_date = f"{next_year:04d}-{next_month:02d}-01"
+            
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # 1. 更新催缴日期
+                cursor.execute(
+                    """
+                    UPDATE electricity_periods 
+                    SET remind_start_date = %s
+                    WHERE id = %s
+                    """,
+                    (remind_date, period_id)
+                )
+                
+                # 2. 取得该期间的未缴记录 + 租客信息
+                cursor.execute(
+                    """
+                    SELECT 
+                        er.id,
+                        er.room_number,
+                        er.amount_due,
+                        t.tenant_name,
+                        tc.line_user_id,
+                        tc.notify_electricity,
+                        ep.period_year,
+                        ep.period_month_start,
+                        ep.period_month_end
+                    FROM electricity_records er
+                    LEFT JOIN tenants t ON er.tenant_id = t.id
+                    LEFT JOIN tenant_contacts tc ON t.id = tc.tenant_id
+                    LEFT JOIN electricity_periods ep ON er.period_id = ep.id
+                    WHERE er.period_id = %s 
+                        AND er.status = 'unpaid'
+                        AND tc.line_user_id IS NOT NULL
+                        AND tc.notify_electricity = true
+                    """,
+                    (period_id,)
+                )
+                
+                records = cursor.fetchall()
+                notified_count = 0
+                
+                for record in records:
+                    er_id, room, amount, tenant_name, line_id, _, year, month_start, month_end = record
+                    
+                    try:
+                        # 调用 LINE 通知
+                        response = self._send_line_notification(
+                            line_id,
+                            room,
+                            amount,
+                            tenant_name,
+                            f"{year}/{month_start}-{month_end}"
+                        )
+                        
+                        if response:
+                            # 更新 last_notified_at
+                            cursor.execute(
+                                """
+                                UPDATE electricity_records 
+                                SET last_notified_at = NOW()
+                                WHERE id = %s
+                                """,
+                                (er_id,)
+                            )
+                            notified_count += 1
+                            logger.info(f"✅ 发送首次通知: {room}")
+                    
+                    except Exception as e:
+                        logger.error(f"❌ 发送失败 {room}: {e}")
+                        continue
+                
+                log_db_operation("NOTIFICATION", "electricity_records", True, notified_count)
+                logger.info(f"✅ 首次通知发送完成: {notified_count} 位租客，催缴日期设为 {remind_date}")
+                return True, f"✅ 已发送首次通知给 {notified_count} 位租客", notified_count
+        
+        except Exception as e:
+            log_db_operation("NOTIFICATION", "electricity_records", False, error=str(e))
+            logger.error(f"❌ 自动通知失败: {str(e)}")
+            return False, str(e), 0
+    
+    def _send_line_notification(self, line_user_id: str, room: str, amount: int, 
+                                 tenant_name: str, period_text: str) -> bool:
+        """
+        发送 LINE 通知 (内部方法)
+        
+        Args:
+            line_user_id: LINE User ID
+            room: 房号
+            amount: 金额
+            tenant_name: 租客名字
+            period_text: 期间文字 (例如 "2026/1-2")
+        
+        Returns:
+            bool: 成功/失败
+        """
+        try:
+            # 准备消息
+            message = f"""⚡ 电费账单通知
+
+房号：{room}
+期间：{period_text}
+金额：${amount:,} 元
+
+请于 7 天内完成缴费。
+
+如有疑问，请联系房东。"""
+            
+            # 调用 LINE Bot API
+            LINE_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN') or st.secrets.get("LINE_CHANNEL_ACCESS_TOKEN")
+            if not LINE_TOKEN:
+                logger.warning("⚠️ 未设置 LINE_CHANNEL_ACCESS_TOKEN")
+                return False
+            
+            response = requests.post(
+                'https://api.line.me/v2/bot/message/push',
+                headers={
+                    'Content-Type': 'application/json',
+                    'Authorization': f'Bearer {LINE_TOKEN}'
+                },
+                json={
+                    'to': line_user_id,
+                    'messages': [{'type': 'text', 'text': message}]
+                },
+                timeout=10
+            )
+            
+            return response.status_code == 200
+        
+        except Exception as e:
+            logger.error(f"❌ LINE 通知失败: {e}")
+            return False
+    
     def get_electricity_payment_record(self, period_id: int) -> Optional[pd.DataFrame]:
         """
-        查询电费计费记录 - v3.1
+        查询电费计费记录 - v3.2
         
         Args:
             period_id: 期间 ID
@@ -1166,7 +1346,7 @@ class SupabaseDB:
     
     def get_electricity_payment_summary(self, period_id: int) -> Optional[Dict]:
         """
-        取得电费统计摘要 - v3.1
+        取得电费统计摘要 - v3.2
         
         Args:
             period_id: 期间 ID
@@ -1219,7 +1399,7 @@ class SupabaseDB:
         payment_date: str
     ) -> Tuple[bool, str]:
         """
-        更新电费缴费状态 - v3.1
+        更新电费缴费状态 - v3.2
         
         Args:
             period_id: 期间 ID
@@ -1261,8 +1441,10 @@ class SupabaseDB:
             return False, str(e)
     
     def __del__(self):
-        """清理连接池"""
-        try:
-            self.pool.close_all()
-        except:
-            pass
+        """清理连接池 - 在 Streamlit 中通常不会被调用"""
+        # ✅ 注释掉自动关闭，让 Streamlit 管理生命周期
+        pass
+        # try:
+        #     self.pool.close_all()
+        # except:
+        #     pass
