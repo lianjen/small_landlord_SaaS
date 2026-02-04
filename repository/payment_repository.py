@@ -1,8 +1,8 @@
-# repository/payment_repository.py v2.1 - 完整修復版
+# repository/payment_repository.py v2.2 - 最終極簡版
 """
 租金資料存取層
-職責:純資料庫 CRUD 操作，不含業務邏輯
-✅ v2.1: 移除 paid_date 欄位（資料庫無此欄位）
+職責：純資料庫 CRUD 操作，不含業務邏輯
+✅ v2.2: 移除 paid_date 和 notes 欄位（資料庫無這些欄位）
 """
 from typing import List, Dict, Optional
 from datetime import datetime
@@ -17,14 +17,7 @@ class PaymentRepository:
         self.db = SupabaseDB()
     
     def create_schedule(self, schedule_data: Dict) -> int:
-        """新增租金排程
-        
-        Args:
-            schedule_data: 排程資料字典
-        
-        Returns:
-            新增的排程 ID
-        """
+        """新增租金排程"""
         with self.db.get_connection() as conn:
             cur = conn.cursor()
             query = """
@@ -84,7 +77,7 @@ class PaymentRepository:
             return dict(result) if result else None
     
     def find_by_id(self, payment_id: int) -> Optional[Dict]:
-        """依 ID 查詢單筆（別名方法，與 get_by_id 相同）"""
+        """依 ID 查詢單筆（別名方法）"""
         return self.get_by_id(payment_id)
     
     def mark_as_paid(self, payment_id: int, paid_amount: float, 
@@ -94,36 +87,27 @@ class PaymentRepository:
         Args:
             payment_id: 排程 ID
             paid_amount: 繳款金額
-            paid_date: 繳款日期（保留參數相容性，但不使用）
-            notes: 備註
+            paid_date: 繳款日期（忽略，保留相容性）
+            notes: 備註（忽略，保留相容性）
         
         Returns:
             是否成功
         """
         with self.db.get_connection() as conn:
             cur = conn.cursor()
-            # ✅ 修復：移除 paid_date 欄位
+            # ✅ 最終修復：只更新 status, paid_amount, updated_at
             cur.execute("""
                 UPDATE payment_schedule
                 SET status = 'paid',
                     paid_amount = %s,
-                    notes = %s,
                     updated_at = NOW()
                 WHERE id = %s
-            """, (paid_amount, notes, payment_id))
+            """, (paid_amount, payment_id))
             success = cur.rowcount > 0
             return success
     
     def get_by_period(self, year: int, month: int) -> List[Dict]:
-        """依期間查詢
-        
-        Args:
-            year: 年份
-            month: 月份
-        
-        Returns:
-            租金記錄列表
-        """
+        """依期間查詢"""
         with self.db.get_connection() as conn:
             cur = conn.cursor(cursor_factory=RealDictCursor)
             cur.execute("""
@@ -135,16 +119,7 @@ class PaymentRepository:
             return [dict(r) for r in results]
     
     def get_by_room_and_period(self, room_number: str, year: int, month: int) -> List[Dict]:
-        """取得指定房間和期間的租金記錄
-        
-        Args:
-            room_number: 房號
-            year: 年份
-            month: 月份
-        
-        Returns:
-            租金記錄列表（自動判斷逾期狀態）
-        """
+        """取得指定房間和期間的租金記錄"""
         try:
             with self.db.get_connection() as conn:
                 cur = conn.cursor(cursor_factory=RealDictCursor)
@@ -172,15 +147,7 @@ class PaymentRepository:
             return []
     
     def get_payment_summary(self, year: int, month: int) -> Dict:
-        """取得租金摘要統計
-        
-        Args:
-            year: 年份
-            month: 月份
-        
-        Returns:
-            包含統計數據的字典
-        """
+        """取得租金摘要統計"""
         with self.db.get_connection() as conn:
             cur = conn.cursor(cursor_factory=RealDictCursor)
             cur.execute("""
@@ -233,23 +200,15 @@ class PaymentRepository:
             return [dict(r) for r in results]
     
     def get_tenant_payment_history(self, room_number: str, limit: int = 12) -> List[Dict]:
-        """取得房客繳款歷史
-        
-        Args:
-            room_number: 房號
-            limit: 限制筆數
-        
-        Returns:
-            繳款歷史列表
-        """
+        """取得房客繳款歷史"""
         with self.db.get_connection() as conn:
             cur = conn.cursor(cursor_factory=RealDictCursor)
-            # ✅ 修復：移除 paid_date 欄位查詢
+            # ✅ 只查詢存在的欄位
             cur.execute("""
                 SELECT 
                     id, room_number, tenant_name,
                     payment_year, payment_month, amount,
-                    paid_amount, status, due_date, notes, 
+                    paid_amount, status, due_date,
                     updated_at, created_at
                 FROM payment_schedule
                 WHERE room_number = %s
@@ -260,11 +219,7 @@ class PaymentRepository:
             return [dict(r) for r in results]
     
     def update_overdue_status(self) -> int:
-        """更新逾期狀態（將過期未繳標記為 overdue）
-        
-        Returns:
-            更新的記錄數
-        """
+        """更新逾期狀態"""
         with self.db.get_connection() as conn:
             cur = conn.cursor()
             cur.execute("""
@@ -279,16 +234,7 @@ class PaymentRepository:
     def get_all_payments(self, year: Optional[int] = None, 
                         month: Optional[int] = None,
                         status: Optional[str] = None) -> List[Dict]:
-        """取得所有租金記錄（支援篩選）
-        
-        Args:
-            year: 年份篩選（可選）
-            month: 月份篩選（可選）
-            status: 狀態篩選（可選）
-        
-        Returns:
-            租金記錄列表
-        """
+        """取得所有租金記錄（支援篩選）"""
         with self.db.get_connection() as conn:
             cur = conn.cursor(cursor_factory=RealDictCursor)
             
