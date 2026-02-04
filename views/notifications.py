@@ -1,5 +1,8 @@
 """
-通知管理頁面
+通知管理頁面 - v2.0
+✅ 支援租金 + 電費通知查看
+✅ 類別篩選功能
+✅ 統計卡片優化
 """
 import streamlit as st
 import pandas as pd
@@ -159,7 +162,7 @@ def render_manual_tab(db):
         return
     
     # 顯示當前待通知項目
-    st.subheader("📋 當前待通知項目")
+    st.subheader("📋 當前待通知項目（租金）")
     
     try:
         with db.get_connection() as conn:
@@ -183,7 +186,7 @@ def render_manual_tab(db):
             df = pd.DataFrame(data, columns=columns)
         
         if df.empty:
-            st.info("🎉 目前沒有需要通知的項目")
+            st.info("🎉 目前沒有需要通知的租金項目")
         else:
             col1, col2, col3 = st.columns(3)
             
@@ -212,12 +215,12 @@ def render_manual_tab(db):
     col1, col2 = st.columns(2)
     
     with col1:
-        if st.button("☀️ 觸發早上通知", type="primary", use_container_width=True):
+        if st.button("💰 觸發租金通知", type="primary", use_container_width=True):
             st.info("💡 請到 Supabase Dashboard → Edge Functions → daily-payment-check → Invoke 手動觸發")
     
     with col2:
-        if st.button("🌙 觸發晚上通知", type="primary", use_container_width=True):
-            st.info("💡 請到 Supabase Dashboard → Edge Functions → daily-payment-check → Invoke 手動觸發")
+        if st.button("⚡ 觸發電費通知", type="primary", use_container_width=True):
+            st.info("💡 請到 Supabase Dashboard → Edge Functions → send-electricity-bill → Invoke 手動觸發")
     
     st.divider()
     
@@ -232,6 +235,9 @@ def render_manual_tab(db):
             display_df["created_at"] = pd.to_datetime(display_df["created_at"]).dt.strftime("%Y-%m-%d %H:%M")
             display_df["status"] = display_df["status"].apply(
                 lambda x: "✅ 已發送" if x == "sent" else "❌ 失敗" if x == "failed" else "⏳ 待發送"
+            )
+            display_df["category"] = display_df["category"].apply(
+                lambda x: "💰 租金" if x == "rent" else "⚡ 電費" if x == "electricity" else "📢 系統"
             )
             st.dataframe(display_df, use_container_width=True, hide_index=True)
         else:
@@ -249,9 +255,17 @@ def render_logs_tab(db):
     st.subheader("📜 通知記錄")
     
     # 篩選條件
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
+        filter_category = st.selectbox(
+            "通知類別",
+            [None, "rent", "electricity", "system"],
+            format_func=lambda x: "全部" if x is None else "💰 租金" if x == "rent" else "⚡ 電費" if x == "electricity" else "📢 系統",
+            key="log_category"
+        )
+    
+    with col2:
         filter_status = st.selectbox(
             "狀態",
             [None, "sent", "failed", "pending"],
@@ -259,32 +273,32 @@ def render_logs_tab(db):
             key="log_status"
         )
     
-    with col2:
+    with col3:
         filter_type = st.selectbox(
-            "接收者類型",
+            "接收者",
             [None, "landlord", "tenant"],
             format_func=lambda x: "全部" if x is None else "🏠 房東" if x == "landlord" else "👤 房客",
             key="log_recipient"
         )
     
-    with col3:
+    with col4:
         days_back = st.number_input("查詢天數", min_value=1, max_value=90, value=7, key="log_days")
     
-    with col4:
+    with col5:
         limit = st.number_input("顯示筆數", min_value=10, max_value=500, value=100, key="log_limit")
     
     st.divider()
     
     # 查詢記錄
     try:
-        df = get_notification_logs(db, days_back, filter_type, filter_status, limit)
+        df = get_notification_logs(db, days_back, filter_type, filter_status, filter_category, limit)
         
         if df.empty:
             st.info("📭 查無記錄")
             return
         
         # 統計卡片
-        cols1, cols2, cols3, cols4 = st.columns(4)
+        cols1, cols2, cols3, cols4, cols5 = st.columns(5)
         
         with cols1:
             st.metric("📊 總記錄數", str(len(df)))
@@ -298,9 +312,19 @@ def render_logs_tab(db):
             st.metric("❌ 失敗", str(failed_count))
         
         with cols4:
-            if len(df) > 0:
-                success_rate = (success_count / len(df) * 100)
-                st.metric("📈 成功率", f"{success_rate:.1f}%")
+            rent_count = len(df[df["category"] == "rent"])
+            st.metric("💰 租金", str(rent_count))
+        
+        with cols5:
+            elec_count = len(df[df["category"] == "electricity"])
+            st.metric("⚡ 電費", str(elec_count))
+        
+        st.divider()
+        
+        # 成功率
+        if len(df) > 0:
+            success_rate = (success_count / len(df) * 100)
+            st.info(f"📈 通知成功率：**{success_rate:.1f}%** ({success_count}/{len(df)})")
         
         st.divider()
         
@@ -312,6 +336,20 @@ def render_logs_tab(db):
         display_df["status"] = display_df["status"].apply(
             lambda x: "✅ 已發送" if x == "sent" else "❌ 失敗" if x == "failed" else "⏳ 待發送"
         )
+        display_df["category"] = display_df["category"].apply(
+            lambda x: "💰 租金" if x == "rent" else "⚡ 電費" if x == "electricity" else "📢 系統" if x == "system" else "❓ 未知"
+        )
+        display_df["recipient_type"] = display_df["recipient_type"].apply(
+            lambda x: "🏠 房東" if x == "landlord" else "👤 房客" if x == "tenant" else "❓ 未知"
+        )
+        
+        # 重新排序欄位，讓類別在前面
+        column_order = ["created_at", "category", "recipient_type", "room_number", "title", "status"]
+        available_columns = [col for col in column_order if col in display_df.columns]
+        remaining_columns = [col for col in display_df.columns if col not in available_columns]
+        final_columns = available_columns + remaining_columns
+        
+        display_df = display_df[final_columns]
         
         st.dataframe(display_df, use_container_width=True, hide_index=True)
         
@@ -323,13 +361,26 @@ def render_logs_tab(db):
             st.write(f"**❌ 失敗記錄詳情（{len(failed_df)} 筆）**")
             
             for idx, row in failed_df.iterrows():
-                with st.expander(f"ID: {row['id']} - {row['notification_type']}"):
-                    st.write(f"**接收者：** {row['recipient_type']} - {row['recipient_id']}")
+                category_emoji = "💰" if row.get('category') == 'rent' else "⚡" if row.get('category') == 'electricity' else "📢"
+                with st.expander(f"{category_emoji} ID: {row['id']} - {row.get('title', row['notification_type'])}"):
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.write(f"**接收者：** {row['recipient_type']}")
+                        st.write(f"**房號：** {row.get('room_number', 'N/A')}")
+                    with col_b:
+                        st.write(f"**類別：** {row.get('category', 'N/A')}")
+                        st.write(f"**時間：** {row['created_at']}")
+                    
                     if row.get('error_message'):
-                        st.error(f"**錯誤：** {row['error_message']}")
+                        st.error(f"**錯誤訊息：** {row['error_message']}")
+                    
+                    if row.get('message'):
+                        with st.expander("查看完整訊息"):
+                            st.text(row['message'])
     
     except Exception as e:
         st.error(f"查詢失敗: {e}")
+        logger.exception("查詢通知記錄時發生錯誤")
 
 
 # ============== 輔助函數 ==============
@@ -408,6 +459,7 @@ def get_recent_notifications(db, limit: int = 10) -> pd.DataFrame:
             query = """
                 SELECT 
                     id,
+                    category,
                     recipient_type,
                     notification_type,
                     status,
@@ -427,7 +479,14 @@ def get_recent_notifications(db, limit: int = 10) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def get_notification_logs(db, days: int, recipient_type: str = None, status: str = None, limit: int = 100) -> pd.DataFrame:
+def get_notification_logs(
+    db, 
+    days: int, 
+    recipient_type: str = None, 
+    status: str = None, 
+    category: str = None,
+    limit: int = 100
+) -> pd.DataFrame:
     """查詢通知記錄"""
     try:
         with db.get_connection() as conn:
@@ -444,14 +503,20 @@ def get_notification_logs(db, days: int, recipient_type: str = None, status: str
                 conditions.append("status = %s")
                 params.append(status)
             
+            if category:
+                conditions.append("category = %s")
+                params.append(category)
+            
             where_clause = " AND ".join(conditions)
             params.append(limit)
             
             query = f"""
                 SELECT 
                     id,
+                    category,
                     recipient_type,
                     recipient_id,
+                    room_number,
                     notification_type,
                     title,
                     message,
