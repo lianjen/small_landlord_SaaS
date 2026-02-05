@@ -1,12 +1,13 @@
 """
-儀表板 - 重構版 v4.1
+儀表板 - 重構版 v3.0 (Service 架構)
 特性:
+- ✅ 使用 Service 架構
+- ✅ 修復 DataFrame 布林判斷錯誤
 - ✅ 修復 f-string 反斜線錯誤
-- 錯誤邊界處理
-- 效能優化 (快取)
-- 動態房間數
-- 統一日期處理
-- 使用 Service 架構
+- ✅ 錯誤邊界處理
+- ✅ 效能優化 (快取)
+- ✅ 動態房間數
+- ✅ 統一日期處理
 """
 
 import streamlit as st
@@ -137,6 +138,26 @@ def safe_parse_date(date_value) -> Optional[date]:
         return None
 
 
+def safe_to_dataframe(data) -> pd.DataFrame:
+    """
+    安全地將資料轉換為 DataFrame
+    
+    Args:
+        data: 可能是 DataFrame, List, Dict 或 None
+    
+    Returns:
+        pd.DataFrame
+    """
+    if isinstance(data, pd.DataFrame):
+        return data if not data.empty else pd.DataFrame()
+    elif isinstance(data, list):
+        return pd.DataFrame(data) if data else pd.DataFrame()
+    elif isinstance(data, dict):
+        return pd.DataFrame([data]) if data else pd.DataFrame()
+    else:
+        return pd.DataFrame()
+
+
 @st.cache_data(ttl=300)  # 快取 5 分鐘
 def calculate_metrics(df_tenants: pd.DataFrame, df_overdue: pd.DataFrame) -> Dict:
     """
@@ -150,13 +171,19 @@ def calculate_metrics(df_tenants: pd.DataFrame, df_overdue: pd.DataFrame) -> Dic
         指標字典
     """
     total_rooms = len(ROOMS.ALL_ROOMS)
-    occupied = len(df_tenants) if not df_tenants.empty else 0
+    
+    # ✅ 安全處理 DataFrame
+    occupied = len(df_tenants) if isinstance(df_tenants, pd.DataFrame) and not df_tenants.empty else 0
     vacant = total_rooms - occupied
     occupancy_rate = round((occupied / total_rooms) * 100, 1) if total_rooms > 0 else 0
     
-    # 計算逾期金額
-    overdue_amount = df_overdue['amount'].sum() if not df_overdue.empty else 0
-    overdue_count = len(df_overdue) if not df_overdue.empty else 0
+    # ✅ 計算逾期金額（安全處理）
+    if isinstance(df_overdue, pd.DataFrame) and not df_overdue.empty and 'amount' in df_overdue.columns:
+        overdue_amount = df_overdue['amount'].sum()
+        overdue_count = len(df_overdue)
+    else:
+        overdue_amount = 0
+        overdue_count = 0
     
     return {
         'total_rooms': total_rooms,
@@ -179,7 +206,8 @@ def get_expiring_leases(df_tenants: pd.DataFrame, days: int = 45) -> List[Dict]:
     Returns:
         即將到期的租約列表
     """
-    if df_tenants.empty:
+    # ✅ 安全檢查
+    if not isinstance(df_tenants, pd.DataFrame) or df_tenants.empty:
         return []
     
     expiring = []
@@ -310,21 +338,23 @@ def render_room_status(df_tenants: pd.DataFrame):
     today = date.today()
     warning_date = today + timedelta(days=45)
     
-    for _, tenant in df_tenants.iterrows():
-        room = tenant['room_number']
-        lease_end = safe_parse_date(tenant.get('lease_end'))
-        
-        # 判斷狀態
-        if lease_end and lease_end <= warning_date:
-            status = 'warning'
-        else:
-            status = 'occupied'
-        
-        room_status[room] = {
-            'tenant': tenant['tenant_name'],
-            'status': status,
-            'rent': tenant.get('base_rent', 0)
-        }
+    # ✅ 安全處理 DataFrame
+    if isinstance(df_tenants, pd.DataFrame) and not df_tenants.empty:
+        for _, tenant in df_tenants.iterrows():
+            room = tenant['room_number']
+            lease_end = safe_parse_date(tenant.get('lease_end'))
+            
+            # 判斷狀態
+            if lease_end and lease_end <= warning_date:
+                status = 'warning'
+            else:
+                status = 'occupied'
+            
+            room_status[room] = {
+                'tenant': tenant['tenant_name'],
+                'status': status,
+                'rent': tenant.get('base_rent', 0)
+            }
     
     # 渲染房間卡片 (每行 3 個)
     rows = [ROOMS.ALL_ROOMS[i:i+3] for i in range(0, len(ROOMS.ALL_ROOMS), 3)]
@@ -413,7 +443,7 @@ def render_memo_section(dashboard_service: DashboardService):
 
 
 def render():
-    """主渲染函數"""
+    """主渲染函數（供 main.py 動態載入使用）"""
     st.title(f"{UI.PAGE_ICON} 儀表板")
     
     # ✅ 初始化 Services
@@ -424,12 +454,15 @@ def render():
     # 載入資料
     with st.spinner("載入資料中..."):
         try:
-            # ✅ 使用 Service 方法
+            # ✅ 使用 Service 方法取得資料
             tenants = tenant_service.get_all_tenants()
-            df_tenants = pd.DataFrame(tenants) if tenants else pd.DataFrame()
-            
             overdue = payment_service.get_overdue_payments()
-            df_overdue = pd.DataFrame(overdue) if overdue else pd.DataFrame()
+            
+            # ✅ 安全轉換為 DataFrame
+            df_tenants = safe_to_dataframe(tenants)
+            df_overdue = safe_to_dataframe(overdue)
+            
+            logger.info(f"✅ 資料載入成功: 房客 {len(df_tenants)}，逾期 {len(df_overdue)}")
         
         except Exception as e:
             st.error(f"❌ 資料載入失敗: {str(e)}")
@@ -469,7 +502,7 @@ def render():
         logger.error(f"渲染失敗: {str(e)}", exc_info=True)
 
 
-# ✅ 主入口
+# ✅ Streamlit 頁面入口
 def show():
     """Streamlit 頁面入口"""
     render()
