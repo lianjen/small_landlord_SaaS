@@ -3,11 +3,12 @@
 ✅ 租客 CRUD 操作
 ✅ 房間佔用檢查
 ✅ 常量驗證
+✅ 完整統計功能
 """
 
 import pandas as pd
 from datetime import date
-from typing import Tuple
+from typing import Tuple, Optional, Dict, List
 
 from services.base_db import BaseDBService
 from services.logger import logger, log_db_operation
@@ -32,7 +33,7 @@ except ImportError:
 
 
 class TenantService(BaseDBService):
-    """租客管理服務"""
+    """租客管理服務 (繼承 BaseDBService)"""
     
     def __init__(self):
         super().__init__()
@@ -73,12 +74,13 @@ class TenantService(BaseDBService):
                     logger.info("📭 無租客記錄")
                     return pd.DataFrame(columns=columns)
                 
+                log_db_operation("SELECT", "tenants", True, len(data))
                 logger.info(f"✅ 查詢到 {len(data)} 位租客")
                 return pd.DataFrame(data, columns=columns)
         
         return self.retry_on_failure(query)
     
-    def get_tenant_by_id(self, tenant_id: int) -> dict:
+    def get_tenant_by_id(self, tenant_id: int) -> Optional[Dict]:
         """
         根據 ID 查詢租客
         
@@ -86,7 +88,7 @@ class TenantService(BaseDBService):
             tenant_id: 租客 ID
         
         Returns:
-            租客資訊字典
+            租客資訊字典，如果不存在返回 None
         """
         try:
             with self.get_connection() as conn:
@@ -103,16 +105,19 @@ class TenantService(BaseDBService):
                 row = cursor.fetchone()
                 
                 if not row:
+                    logger.warning(f"⚠️ 找不到租客 ID: {tenant_id}")
                     return None
                 
                 columns = [desc[0] for desc in cursor.description]
+                log_db_operation("SELECT", "tenants", True, 1)
                 return dict(zip(columns, row))
         
         except Exception as e:
+            log_db_operation("SELECT", "tenants", False, error=str(e))
             logger.error(f"❌ 查詢失敗: {str(e)}")
             return None
     
-    def get_tenant_by_room(self, room_number: str) -> dict:
+    def get_tenant_by_room(self, room_number: str) -> Optional[Dict]:
         """
         根據房號查詢租客
         
@@ -120,7 +125,7 @@ class TenantService(BaseDBService):
             room_number: 房號
         
         Returns:
-            租客資訊字典
+            租客資訊字典，如果不存在返回 None
         """
         try:
             with self.get_connection() as conn:
@@ -137,12 +142,15 @@ class TenantService(BaseDBService):
                 row = cursor.fetchone()
                 
                 if not row:
+                    logger.info(f"📭 房間 {room_number} 目前無租客")
                     return None
                 
                 columns = [desc[0] for desc in cursor.description]
+                log_db_operation("SELECT", "tenants", True, 1)
                 return dict(zip(columns, row))
         
         except Exception as e:
+            log_db_operation("SELECT", "tenants", False, error=str(e))
             logger.error(f"❌ 查詢失敗: {str(e)}")
             return None
     
@@ -191,6 +199,11 @@ class TenantService(BaseDBService):
             if payment_method not in self.payment_methods:
                 logger.warning(f"❌ 支付方式無效: {payment_method}")
                 return False, f"無效支付方式: {payment_method}"
+            
+            # 驗證日期邏輯
+            if start >= end:
+                logger.warning(f"❌ 日期邏輯錯誤: 開始日 {start} >= 結束日 {end}")
+                return False, "租約開始日必須早於結束日"
             
             with self.get_connection() as conn:
                 cursor = conn.cursor()
@@ -257,8 +270,17 @@ class TenantService(BaseDBService):
             if payment_method not in self.payment_methods:
                 return False, f"無效支付方式: {payment_method}"
             
+            # 驗證日期邏輯
+            if start >= end:
+                return False, "租約開始日必須早於結束日"
+            
             with self.get_connection() as conn:
                 cursor = conn.cursor()
+                
+                # 檢查租客是否存在
+                cursor.execute("SELECT COUNT(*) FROM tenants WHERE id = %s", (tenant_id,))
+                if cursor.fetchone()[0] == 0:
+                    return False, f"租客 ID {tenant_id} 不存在"
                 
                 cursor.execute("""
                     UPDATE tenants SET
@@ -293,11 +315,21 @@ class TenantService(BaseDBService):
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
+                
+                # 檢查租客是否存在
+                cursor.execute("SELECT tenant_name FROM tenants WHERE id = %s", (tenant_id,))
+                row = cursor.fetchone()
+                
+                if not row:
+                    return False, f"租客 ID {tenant_id} 不存在"
+                
+                tenant_name = row[0]
+                
                 cursor.execute("UPDATE tenants SET is_active = false WHERE id = %s", (tenant_id,))
                 
-                log_db_operation("UPDATE", "tenants", True, 1)
-                logger.info(f"✅ 刪除租客 ID: {tenant_id}")
-                return True, "刪除成功"
+                log_db_operation("UPDATE", "tenants (soft delete)", True, 1)
+                logger.info(f"✅ 刪除租客 ID: {tenant_id} ({tenant_name})")
+                return True, f"成功刪除租客 {tenant_name}"
         
         except Exception as e:
             log_db_operation("UPDATE", "tenants", False, error=str(e))
@@ -325,13 +357,16 @@ class TenantService(BaseDBService):
                 )
                 
                 count = cursor.fetchone()[0]
-                return count == 0
+                is_available = count == 0
+                
+                logger.info(f"🔍 房間 {room_number}: {'可用' if is_available else '已佔用'}")
+                return is_available
         
         except Exception as e:
             logger.error(f"❌ 檢查失敗: {str(e)}")
             return False
     
-    def get_available_rooms(self) -> list:
+    def get_available_rooms(self) -> List[str]:
         """
         取得所有可用房間
         
@@ -351,14 +386,16 @@ class TenantService(BaseDBService):
                 occupied_rooms = [row[0] for row in cursor.fetchall()]
                 available_rooms = [room for room in self.all_rooms if room not in occupied_rooms]
                 
+                log_db_operation("SELECT", "tenants (available rooms)", True, len(available_rooms))
                 logger.info(f"✅ 可用房間: {len(available_rooms)} 間")
                 return available_rooms
         
         except Exception as e:
+            log_db_operation("SELECT", "tenants (available rooms)", False, error=str(e))
             logger.error(f"❌ 查詢失敗: {str(e)}")
             return []
     
-    def get_tenant_statistics(self) -> dict:
+    def get_tenant_statistics(self) -> Dict:
         """
         取得租客統計數據
         
@@ -381,16 +418,74 @@ class TenantService(BaseDBService):
                 
                 row = cursor.fetchone()
                 
-                return {
-                    'total_tenants': int(row[0] or 0),
+                total_tenants = int(row[0] or 0)
+                total_rooms = len(self.all_rooms)
+                available_rooms = total_rooms - total_tenants
+                occupancy_rate = (total_tenants / total_rooms * 100) if total_rooms > 0 else 0
+                
+                stats = {
+                    'total_tenants': total_tenants,
                     'total_rent': float(row[1] or 0),
                     'avg_rent': float(row[2] or 0),
                     'total_deposit': float(row[3] or 0),
-                    'occupied_rooms': int(row[0] or 0),
-                    'available_rooms': len(self.all_rooms) - int(row[0] or 0),
-                    'occupancy_rate': (int(row[0] or 0) / len(self.all_rooms) * 100) if self.all_rooms else 0
+                    'occupied_rooms': total_tenants,
+                    'available_rooms': available_rooms,
+                    'total_rooms': total_rooms,
+                    'occupancy_rate': round(occupancy_rate, 2)
                 }
+                
+                log_db_operation("SELECT", "tenants (statistics)", True, 1)
+                logger.info(f"✅ 統計完成: 出租率 {occupancy_rate:.1f}%")
+                
+                return stats
         
         except Exception as e:
+            log_db_operation("SELECT", "tenants (statistics)", False, error=str(e))
             logger.error(f"❌ 統計失敗: {str(e)}")
-            return {}
+            return {
+                'total_tenants': 0,
+                'total_rent': 0.0,
+                'avg_rent': 0.0,
+                'total_deposit': 0.0,
+                'occupied_rooms': 0,
+                'available_rooms': len(self.all_rooms),
+                'total_rooms': len(self.all_rooms),
+                'occupancy_rate': 0.0
+            }
+    
+    def get_expiring_leases(self, days: int = 30) -> List[Dict]:
+        """
+        取得即將到期的租約
+        
+        Args:
+            days: 提前天數（預設 30 天）
+        
+        Returns:
+            即將到期的租客列表
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    SELECT id, room_number, tenant_name, phone, lease_end,
+                           (lease_end - CURRENT_DATE) as days_remaining
+                    FROM tenants
+                    WHERE is_active = true 
+                    AND lease_end <= CURRENT_DATE + INTERVAL '%s days'
+                    AND lease_end >= CURRENT_DATE
+                    ORDER BY lease_end
+                """, (days,))
+                
+                columns = [desc[0] for desc in cursor.description]
+                rows = cursor.fetchall()
+                
+                log_db_operation("SELECT", "tenants (expiring leases)", True, len(rows))
+                logger.info(f"⏰ 找到 {len(rows)} 筆即將到期的租約")
+                
+                return [dict(zip(columns, row)) for row in rows]
+        
+        except Exception as e:
+            log_db_operation("SELECT", "tenants (expiring leases)", False, error=str(e))
+            logger.error(f"❌ 查詢失敗: {str(e)}")
+            return []
