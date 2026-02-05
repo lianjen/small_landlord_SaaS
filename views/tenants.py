@@ -5,6 +5,7 @@
 ✅ 完整表單驗證
 ✅ 租約衝突檢查
 ✅ 刪除確認優化
+✅ 修復 Service 調用方式
 """
 import streamlit as st
 import pandas as pd
@@ -229,28 +230,26 @@ def render_add_tab(tenant_service: TenantService):
             
             # ✅ 使用 TenantService 新增房客
             try:
-                tenant_data = {
-                    'room_number': room,
-                    'tenant_name': name,
-                    'phone': phone,
-                    'deposit': deposit,
-                    'base_rent': base_rent,
-                    'lease_start': lease_start,
-                    'lease_end': lease_end,
-                    'payment_method': payment_method,
-                    'has_water_fee': has_water_fee,
-                    'annual_discount_months': annual_discount_months,
-                    'discount_notes': discount_notes
-                }
+                success, message = tenant_service.add_tenant(
+                    room=room,
+                    name=name,
+                    phone=phone,
+                    deposit=deposit,
+                    base_rent=base_rent,
+                    start=lease_start,
+                    end=lease_end,
+                    payment_method=payment_method,
+                    has_water_fee=has_water_fee,
+                    annual_discount_months=annual_discount_months,
+                    discount_notes=discount_notes
+                )
                 
-                tenant_id = tenant_service.create_tenant(tenant_data)
-                
-                if tenant_id:
-                    st.success(f"✅ 房客 {name} 新增成功！")
+                if success:
+                    st.success(f"✅ {message}")
                     st.balloons()
                     st.rerun()
                 else:
-                    st.error("❌ 新增失敗")
+                    st.error(f"❌ {message}")
             
             except Exception as e:
                 st.error(f"❌ 新增失敗: {str(e)}")
@@ -484,29 +483,28 @@ def render_edit_tab(tenant_service: TenantService):
                     st.error(f"❌ {conflict_msg}")
                     return
                 
-                # ✅ 使用 TenantService 更新房客
+                # ✅ 使用 TenantService 更新房客（修復：使用正確的參數格式）
                 try:
-                    updated_data = {
-                        'room_number': room,
-                        'tenant_name': name,
-                        'phone': phone,
-                        'deposit': deposit,
-                        'base_rent': base_rent,
-                        'lease_start': lease_start,
-                        'lease_end': lease_end,
-                        'payment_method': payment_method,
-                        'has_water_fee': has_water_fee,
-                        'annual_discount_months': annual_discount_months,
-                        'discount_notes': discount_notes
-                    }
+                    success, message = tenant_service.update_tenant(
+                        tenant_id=tenant_id,
+                        room=room,
+                        name=name,
+                        phone=phone,
+                        deposit=deposit,
+                        base_rent=base_rent,
+                        start=lease_start,
+                        end=lease_end,
+                        payment_method=payment_method,
+                        has_water_fee=has_water_fee,
+                        annual_discount_months=annual_discount_months,
+                        discount_notes=discount_notes
+                    )
                     
-                    ok = tenant_service.update_tenant(tenant_id, updated_data)
-                    
-                    if ok:
-                        st.success(f"✅ 房客 {name} 已更新")
+                    if success:
+                        st.success(f"✅ {message}")
                         st.rerun()
                     else:
-                        st.error("❌ 更新失敗")
+                        st.error(f"❌ {message}")
                 
                 except Exception as e:
                     st.error(f"❌ 更新失敗: {str(e)}")
@@ -514,20 +512,25 @@ def render_edit_tab(tenant_service: TenantService):
             
             if delete_btn:
                 # ✅ 使用 session_state 實作二次確認
-                if not st.session_state.get(f'confirm_delete_{tenant_id}'):
-                    st.session_state[f'confirm_delete_{tenant_id}'] = True
+                confirm_key = f'confirm_delete_{tenant_id}'
+                
+                if not st.session_state.get(confirm_key):
+                    st.session_state[confirm_key] = True
                     st.warning("⚠️ 再次點擊「刪除」確認刪除房客")
+                    st.rerun()
                 else:
                     try:
-                        ok = tenant_service.delete_tenant(tenant_id)
+                        # ✅ 修復：delete_tenant 返回 (bool, str)
+                        success, message = tenant_service.delete_tenant(tenant_id)
                         
-                        if ok:
-                            st.success(f"✅ 房客 {tenant_data['tenant_name']} 已刪除")
+                        if success:
+                            st.success(f"✅ {message}")
                             # 清除確認狀態
-                            del st.session_state[f'confirm_delete_{tenant_id}']
+                            if confirm_key in st.session_state:
+                                del st.session_state[confirm_key]
                             st.rerun()
                         else:
-                            st.error("❌ 刪除失敗")
+                            st.error(f"❌ {message}")
                     
                     except Exception as e:
                         st.error(f"❌ 刪除失敗: {str(e)}")
