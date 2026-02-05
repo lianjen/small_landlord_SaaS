@@ -1,10 +1,11 @@
 """
 幸福之家 Pro - 租賃管理系統
-Nordic Edition v3.0 (Service Architecture)
+Nordic Edition v3.1 (Service Architecture)
 ✅ 完全移除 db 依賴
 ✅ 使用 Service 架構
 ✅ 動態載入頁面模組
 ✅ 修正模組名稱映射
+✅ 新增 LINE 綁定管理
 """
 
 import os
@@ -62,7 +63,7 @@ if missing_vars:
 # 讀取全域配置（允許從 env / secrets 覆蓋預設值）
 APP_CONFIG = {
     "title": get_env("APP_TITLE", "幸福之家 Pro"),
-    "version": get_env("APP_VERSION", "v14.3"),
+    "version": get_env("APP_VERSION", "v14.4"),  # ✅ 版本號升級
     "environment": get_env("ENVIRONMENT", "production"),
     "log_level": get_env("LOG_LEVEL", "INFO"),
 }
@@ -177,6 +178,7 @@ def main() -> None:
         
         st.divider()
 
+        # ✅ 調整選單順序：將 LINE 綁定放在通知管理前面
         menu = st.radio(
             "功能選單",
             [
@@ -186,6 +188,7 @@ def main() -> None:
                 "📋 繳費追蹤",
                 "⚡ 電費管理",
                 "💸 支出記錄",
+                "📱 LINE 綁定",      # ✅ 新增
                 "📬 通知管理",
                 "⚙️ 系統設定",
             ],
@@ -214,17 +217,25 @@ def main() -> None:
             # 版本資訊
             st.caption(f"Version: {APP_CONFIG['version']}")
             st.caption(f"Architecture: Service Layer")
+            
+            # ✅ 顯示 LINE 功能狀態
+            line_token = get_env("LINE_CHANNEL_ACCESS_TOKEN")
+            if line_token:
+                st.success("✅ LINE Bot", icon="📱")
+            else:
+                st.warning("⚠️ LINE Bot", icon="📱")
 
     # ============ 動態載入 Views (無 db 參數) ============
     
-    # ✅ 修正：頁面模組映射（對應實際檔案名稱）
+    # ✅ 新增 LINE 綁定模組映射
     PAGE_MODULES = {
         "📊 儀表板": "dashboard",
-        "👥 房客管理": "tenants",        # ✅ 修正為 tenants
-        "💰 租金管理": "rent",           # ✅ 修正為 rent
+        "👥 房客管理": "tenants",
+        "💰 租金管理": "rent",
         "📋 繳費追蹤": "tracking",
         "⚡ 電費管理": "electricity",
         "💸 支出記錄": "expenses",
+        "📱 LINE 綁定": "line_binding",    # ✅ 新增
         "📬 通知管理": "notifications",
         "⚙️ 系統設定": "settings",
     }
