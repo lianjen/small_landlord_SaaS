@@ -1,6 +1,7 @@
 """
-儀表板 - 重構版 v4.0
+儀表板 - 重構版 v4.1
 特性:
+- ✅ 修復 f-string 反斜線錯誤
 - 錯誤邊界處理
 - 效能優化 (快取)
 - 動態房間數
@@ -12,8 +13,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta, date
 from typing import List, Dict, Optional
-import sys
-sys.path.append('..')
+import logging
 
 from components.cards import (
     section_header, metric_card, room_status_card, 
@@ -25,6 +25,8 @@ from config.constants import ROOMS, UI
 from services.tenant_service import TenantService
 from services.payment_service import PaymentService
 from services.base_db import BaseDBService
+
+logger = logging.getLogger(__name__)
 
 
 class DashboardService(BaseDBService):
@@ -69,6 +71,7 @@ class DashboardService(BaseDBService):
         
         except Exception as e:
             st.error(f"❌ 查詢備忘錄失敗: {str(e)}")
+            logger.error(f"查詢備忘錄失敗: {str(e)}", exc_info=True)
             return []
     
     def add_memo(self, memo_text: str, priority: str = 'normal') -> bool:
@@ -86,6 +89,7 @@ class DashboardService(BaseDBService):
         
         except Exception as e:
             st.error(f"❌ 新增備忘錄失敗: {str(e)}")
+            logger.error(f"新增備忘錄失敗: {str(e)}", exc_info=True)
             return False
     
     def complete_memo(self, memo_id: int) -> bool:
@@ -104,6 +108,7 @@ class DashboardService(BaseDBService):
         
         except Exception as e:
             st.error(f"❌ 完成備忘錄失敗: {str(e)}")
+            logger.error(f"完成備忘錄失敗: {str(e)}", exc_info=True)
             return False
 
 
@@ -129,7 +134,6 @@ def safe_parse_date(date_value) -> Optional[date]:
     try:
         return datetime.strptime(str(date_value), "%Y-%m-%d").date()
     except (ValueError, TypeError):
-        # ✅ 不在函數內顯示警告，交給呼叫者處理
         return None
 
 
@@ -262,20 +266,24 @@ def render_lease_alerts(expiring_leases: List[Dict]):
     if urgent:
         st.error(f"🚨 緊急: {len(urgent)} 個租約 14 天內到期")
         for lease in urgent:
+            # ✅ 修復：先建立字串，再用 f-string
+            days_text = f"{lease['days_left']} 天"
             st.markdown(
                 f"**{lease['room']}** - {lease['tenant']} | "
                 f"到期日: {lease['lease_end']} | "
-                f"{status_badge(f\"{lease['days_left']} 天\", 'error')}",
+                f"{status_badge(days_text, 'error')}",
                 unsafe_allow_html=True
             )
     
     if warning:
         st.warning(f"⚠️ 注意: {len(warning)} 個租約 30 天內到期")
         for lease in warning:
+            # ✅ 修復：先建立字串，再用 f-string
+            days_text = f"{lease['days_left']} 天"
             st.markdown(
                 f"**{lease['room']}** - {lease['tenant']} | "
                 f"到期日: {lease['lease_end']} | "
-                f"{status_badge(f\"{lease['days_left']} 天\", 'warning')}",
+                f"{status_badge(days_text, 'warning')}",
                 unsafe_allow_html=True
             )
     
@@ -283,10 +291,12 @@ def render_lease_alerts(expiring_leases: List[Dict]):
         st.info(f"ℹ️ 提醒: {len(notice)} 個租約 45 天內到期")
         with st.expander("查看詳情"):
             for lease in notice:
+                # ✅ 修復：先建立字串，再用 f-string
+                days_text = f"{lease['days_left']} 天"
                 st.markdown(
                     f"**{lease['room']}** - {lease['tenant']} | "
                     f"到期日: {lease['lease_end']} | "
-                    f"{status_badge(f\"{lease['days_left']} 天\", 'info')}",
+                    f"{status_badge(days_text, 'info')}",
                     unsafe_allow_html=True
                 )
 
@@ -360,7 +370,7 @@ def render_memo_section(dashboard_service: DashboardService):
             key="memo_priority"
         )
     
-    if st.button("➕ 新增", key="add_memo_btn"):
+    if st.button("➕ 新增", key="add_memo_btn", use_container_width=True):
         if new_memo.strip():
             if dashboard_service.add_memo(new_memo, priority):
                 st.success("✅ 已新增待辦事項")
@@ -423,7 +433,7 @@ def render():
         
         except Exception as e:
             st.error(f"❌ 資料載入失敗: {str(e)}")
-            st.exception(e)  # ✅ 顯示詳細錯誤
+            logger.error(f"資料載入失敗: {str(e)}", exc_info=True)
             return
     
     # 計算指標
@@ -431,6 +441,7 @@ def render():
         metrics = calculate_metrics(df_tenants, df_overdue)
     except Exception as e:
         st.error(f"❌ 指標計算失敗: {str(e)}")
+        logger.error(f"指標計算失敗: {str(e)}", exc_info=True)
         return
     
     # 渲染各區塊
@@ -455,7 +466,7 @@ def render():
     
     except Exception as e:
         st.error(f"❌ 渲染失敗: {str(e)}")
-        st.exception(e)
+        logger.error(f"渲染失敗: {str(e)}", exc_info=True)
 
 
 # ✅ 主入口
