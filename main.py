@@ -1,9 +1,13 @@
 """
 幸福之家 Pro - 租賃管理系統
-Nordic Edition v14.2
+Nordic Edition v3.0 (Service Architecture)
+✅ 完全移除 db 依賴
+✅ 使用 Service 架構
+✅ 動態載入頁面模組
 """
 
 import os
+import logging
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -57,7 +61,7 @@ if missing_vars:
 # 讀取全域配置（允許從 env / secrets 覆蓋預設值）
 APP_CONFIG = {
     "title": get_env("APP_TITLE", "幸福之家 Pro"),
-    "version": get_env("APP_VERSION", "v14.2"),
+    "version": get_env("APP_VERSION", "v3.0"),
     "environment": get_env("ENVIRONMENT", "production"),
     "log_level": get_env("LOG_LEVEL", "INFO"),
 }
@@ -73,7 +77,23 @@ st.set_page_config(
 )
 
 # ============================================
-# 2. Load CSS
+# 2. Logging Configuration
+# ============================================
+
+logging.basicConfig(
+    level=getattr(logging, APP_CONFIG["log_level"].upper(), logging.INFO),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('app.log', encoding='utf-8')
+    ]
+)
+
+logger = logging.getLogger(__name__)
+logger.info(f"啟動應用程式: {APP_CONFIG['title']} {APP_CONFIG['version']}")
+
+# ============================================
+# 3. Load CSS
 # ============================================
 
 
@@ -83,10 +103,11 @@ def load_css(filename: str) -> None:
         with open(filename, encoding="utf-8") as f:
             css = f.read()
         st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
+        logger.info(f"成功載入 CSS: {filename}")
     except FileNotFoundError:
-        # 本機或部署時沒有 CSS 檔案不影響主流程
-        pass
+        logger.warning(f"CSS 檔案不存在: {filename}")
     except Exception as e:
+        logger.error(f"載入 CSS 時發生錯誤: {e}", exc_info=True)
         st.warning(f"載入 CSS 時發生錯誤: {e}")
 
 
@@ -94,54 +115,59 @@ css_path = os.path.join("assets", "style.css")
 load_css(css_path)
 
 # ============================================
-# 3. Database - 修復 Import 路徑
+# 4. Database Health Check (Optional)
 # ============================================
 
-# ✅ 修正：使用 db_legacy 向後兼容層
-from services.db_legacy import SupabaseDB, get_database_instance  # noqa: E402
+# ✅ 可選：在啟動時檢查資料庫連線
+# 注意：Service 架構中，每個 Service 內部會自行管理連線
+from services.base_db import BaseDBService  # noqa: E402
 
 
 @st.cache_resource
-def get_db() -> SupabaseDB:
-    """
-    初始化並快取資料庫連線。
-    
-    使用 db_legacy 向後兼容層，內部自動調用新的模組化服務。
-    """
+def check_database_health() -> bool:
+    """檢查資料庫連線健康狀態"""
     try:
-        db = get_database_instance()
-        
-        # 健康檢查
-        if not db.health_check():
-            st.error("⚠️ 資料庫健康檢查失敗，請檢查連線設定")
-            raise ConnectionError("Database health check failed")
-        
-        return db
+        db_service = BaseDBService()
+        with db_service.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            result = cursor.fetchone()
+            
+            if result and result[0] == 1:
+                logger.info("✅ 資料庫連線健康檢查通過")
+                return True
+            else:
+                logger.error("❌ 資料庫健康檢查失敗：查詢結果異常")
+                return False
+    
     except Exception as e:
-        st.error(f"❌ 資料庫初始化失敗: {e}")
-        raise
+        logger.error(f"❌ 資料庫健康檢查失敗: {e}", exc_info=True)
+        return False
 
 
 # ============================================
-# 4. Main Function
+# 5. Main Function
 # ============================================
 
 
 def main() -> None:
     """主程式進入點"""
     
-    # 初始化資料庫
+    # ✅ 可選：啟動時檢查資料庫連線
     try:
-        db = get_db()
+        db_healthy = check_database_health()
+        
+        if not db_healthy:
+            st.error("⚠️ 資料庫連線異常，某些功能可能無法使用")
+            st.info("💡 請確認 Streamlit Secrets 中已正確設定 SUPABASE_URL 和 SUPABASE_KEY")
+            
+            if APP_CONFIG["environment"] == "development":
+                if st.button("🔄 重新檢查"):
+                    st.cache_resource.clear()
+                    st.rerun()
+    
     except Exception as e:
-        st.error(f"資料庫連線失敗: {e}")
-        st.info("💡 請確認 Streamlit Secrets 中已正確設定 SUPABASE_URL 和 SUPABASE_KEY")
-        
-        # 顯示除錯資訊（僅開發環境）
-        if APP_CONFIG["environment"] == "development":
-            st.exception(e)
-        
-        st.stop()
+        logger.error(f"資料庫健康檢查異常: {e}", exc_info=True)
 
     # ============ 側邊欄 ============
     with st.sidebar:
@@ -154,9 +180,9 @@ def main() -> None:
             "功能選單",
             [
                 "📊 儀表板",
-                "💰 租金管理",
-                "📝 追蹤功能",
                 "👥 房客管理",
+                "💰 租金管理",
+                "📋 繳費追蹤",
                 "⚡ 電費管理",
                 "💸 支出記錄",
                 "📬 通知管理",
@@ -172,7 +198,7 @@ def main() -> None:
             with col1:
                 # 資料庫狀態
                 try:
-                    if db.health_check():
+                    if check_database_health():
                         st.success("✅ 資料庫", icon="🗄️")
                     else:
                         st.error("❌ 資料庫", icon="🗄️")
@@ -183,50 +209,59 @@ def main() -> None:
                 # 環境資訊
                 env_icon = "🚀" if APP_CONFIG["environment"] == "production" else "🔧"
                 st.info(f"{env_icon} {APP_CONFIG['environment']}")
+            
+            # 版本資訊
+            st.caption(f"Version: {APP_CONFIG['version']}")
+            st.caption(f"Architecture: Service Layer")
 
-    # ============ 動態載入 Views (Lazy Loading) ============
+    # ============ 動態載入 Views (無 db 參數) ============
+    
+    # ✅ 頁面模組映射
+    PAGE_MODULES = {
+        "📊 儀表板": "dashboard",
+        "👥 房客管理": "tenant_management",
+        "💰 租金管理": "rent_management",
+        "📋 繳費追蹤": "tracking",
+        "⚡ 電費管理": "electricity",
+        "💸 支出記錄": "expenses",
+        "📬 通知管理": "notifications",
+        "⚙️ 系統設定": "settings",
+    }
+    
+    page_module = PAGE_MODULES.get(menu)
+    
+    if not page_module:
+        st.error(f"❌ 未知的頁面: {menu}")
+        logger.error(f"未知的頁面選擇: {menu}")
+        return
+    
     try:
-        if menu == "📊 儀表板":
-            from views import dashboard  # noqa: E402
-            dashboard.render(db)
-            
-        elif menu == "💰 租金管理":
-            from views import rent  # noqa: E402
-            rent.render(db)
-            
-        elif menu == "📝 追蹤功能":
-            from views import tracking  # noqa: E402
-            tracking.render(db)
-            
-        elif menu == "👥 房客管理":
-            from views import tenants  # noqa: E402
-            tenants.render(db)
-            
-        elif menu == "⚡ 電費管理":
-            from views import electricity  # noqa: E402
-            electricity.render(db)
-            
-        elif menu == "💸 支出記錄":
-            from views import expenses  # noqa: E402
-            expenses.render(db)
-            
-        elif menu == "📬 通知管理":
-            from views import notifications  # noqa: E402
-            notifications.render(db)
-            
-        elif menu == "⚙️ 系統設定":
-            from views import settings  # noqa: E402
-            settings.render(db)
+        # ✅ 動態載入模組
+        import importlib
+        module = importlib.import_module(f"views.{page_module}")
+        
+        logger.info(f"載入頁面模組: {page_module}")
+        
+        # ✅ 呼叫 render() 或 show() 函數（不傳入任何參數）
+        if hasattr(module, 'render'):
+            module.render()
+        elif hasattr(module, 'show'):
+            module.show()
+        else:
+            st.error(f"❌ 模組 {page_module} 缺少 render() 或 show() 函數")
+            logger.error(f"模組 {page_module} 缺少入口函數")
             
     except ImportError as e:
-        st.error(f"❌ 無法載入頁面模組: {e}")
+        st.error(f"❌ 無法載入頁面模組: {page_module}")
         st.info("💡 請確認 views/ 目錄下對應的模組檔案存在")
+        logger.error(f"載入模組失敗: {page_module} - {e}", exc_info=True)
         
         if APP_CONFIG["environment"] == "development":
             st.exception(e)
             
     except Exception as e:
         st.error(f"❌ 載入頁面時發生錯誤: {e}")
+        logger.error(f"頁面渲染失敗: {page_module} - {e}", exc_info=True)
         
         if APP_CONFIG["environment"] == "development":
             st.exception(e)
@@ -235,8 +270,15 @@ def main() -> None:
 
 
 # ============================================
-# 5. Entry Point
+# 6. Entry Point
 # ============================================
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        logger.critical(f"應用程式啟動失敗: {e}", exc_info=True)
+        st.error(f"❌ 系統啟動失敗: {e}")
+        
+        if APP_CONFIG.get("environment") == "development":
+            st.exception(e)
