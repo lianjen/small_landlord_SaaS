@@ -6,6 +6,7 @@
 ✅ 完整的行為追蹤
 """
 
+import json
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from enum import Enum
@@ -36,7 +37,7 @@ class TenantBehaviorProfile:
 
 
 class ReminderService(BaseDBService):
-    """智能催繳引擎"""
+    """智能催繳引擎 (繼承 BaseDBService)"""
     
     def __init__(self):
         super().__init__()
@@ -48,6 +49,7 @@ class ReminderService(BaseDBService):
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
+                # ✅ 修正：使用正確的 PostgreSQL 語法
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS tenant_behavior (
                         tenant_id TEXT PRIMARY KEY,
@@ -80,9 +82,11 @@ class ReminderService(BaseDBService):
                     ON reminder_history(tenant_id, rent_month)
                 """)
                 
+                log_db_operation("CREATE TABLE", "tenant_behavior & reminder_history", True, 3)
                 logger.info("✅ 催繳表初始化完成")
         
         except Exception as e:
+            log_db_operation("CREATE TABLE", "reminder tables", False, error=str(e))
             logger.error(f"❌ 初始化失敗: {str(e)}")
     
     # ==================== 核心催繳邏輯 ====================
@@ -107,24 +111,28 @@ class ReminderService(BaseDBService):
         
         if profile.total_reminders < 3:
             # 新租客：標準流程
+            logger.info(f"🆕 新租客 {tenant_id}: 使用標準流程 [1, 5, 10]")
             return [1, 5, 10]
         
         if profile.on_time_rate >= 0.9:
             # 優良租客：只需輕微提醒
+            logger.info(f"⭐ 優良租客 {tenant_id}: 僅提醒 1 次")
             return [1]
         
         elif profile.on_time_rate >= 0.6:
             # 偶爾遲交：稍微提前
+            logger.info(f"⚠️ 偶爾遲交 {tenant_id}: 使用 [0, 3, 7]")
             return [0, 3, 7]  # 到期當天、3天後、7天後
         
         else:
             # 高風險租客：提前+密集
             avg_delay = int(profile.avg_payment_delay)
+            logger.warning(f"🚨 高風險租客 {tenant_id}: 提前+密集催繳")
             return [
                 -1,  # 提前一天預警
                 2,   # 逾期2天
                 5,   # 逾期5天
-                min(8, avg_delay - 2)  # 根據平均延遲調整
+                min(8, max(avg_delay - 2, 7))  # ✅ 修正：避免負數
             ]
     
     def should_send_reminder(
@@ -147,30 +155,42 @@ class ReminderService(BaseDBService):
         if current_date is None:
             current_date = datetime.now()
         
+        # ✅ 修正：統一處理 datetime 和 date 類型
+        if isinstance(due_date, datetime):
+            due_date_obj = due_date
+        else:
+            due_date_obj = datetime.combine(due_date, datetime.min.time())
+        
         # 計算距離到期日天數（負數 = 已逾期）
-        days_diff = (due_date.date() - current_date.date()).days
+        days_diff = (due_date_obj.date() - current_date.date()).days
         
         # 取得最佳提醒時間點
         optimal_days = self.calculate_optimal_reminder_days(tenant_id)
         
         # 查詢本月已發送的提醒
-        rent_month = due_date.strftime('%Y-%m')
+        rent_month = due_date_obj.strftime('%Y-%m')
         sent_stages = self._get_sent_reminders(tenant_id, rent_month)
+        
+        logger.info(f"🔍 {tenant_id}: 距到期 {days_diff} 天, 已發送: {[s.value for s in sent_stages]}")
         
         # 判斷邏輯
         if len(optimal_days) >= 1 and days_diff == optimal_days[0] and ReminderStage.FIRST not in sent_stages:
+            logger.info(f"✅ 應發送第一次提醒")
             return ReminderStage.FIRST
         
         elif len(optimal_days) >= 2 and days_diff <= optimal_days[1] and ReminderStage.SECOND not in sent_stages:
             if ReminderStage.FIRST in sent_stages:  # 必須先發過第一次
+                logger.info(f"✅ 應發送第二次提醒")
                 return ReminderStage.SECOND
         
         elif len(optimal_days) >= 3 and days_diff <= optimal_days[2] and ReminderStage.THIRD not in sent_stages:
             if ReminderStage.SECOND in sent_stages:
+                logger.info(f"✅ 應發送第三次提醒")
                 return ReminderStage.THIRD
         
         elif days_diff <= -7 and ReminderStage.FINAL not in sent_stages:
             # 逾期 7 天，發最終通知
+            logger.warning(f"🚨 應發送最終通知（已逾期 {abs(days_diff)} 天）")
             return ReminderStage.FINAL
         
         return None
@@ -196,11 +216,20 @@ class ReminderService(BaseDBService):
         Returns:
             催繳訊息文字
         """
+        # ✅ 修正：統一處理日期格式
+        if isinstance(due_date, datetime):
+            due_date_str = due_date.strftime('%Y/%m/%d')
+        else:
+            due_date_str = due_date.strftime('%Y/%m/%d')
+        
+        # 計算逾期天數
+        overdue_days = (datetime.now().date() - due_date.date() if isinstance(due_date, datetime) else datetime.now().date() - due_date).days
+        
         templates = {
             ReminderStage.FIRST: f"""親愛的 {tenant_name} 您好，
 
 這是一則友善的提醒：
-📅 房租到期日：{due_date.strftime('%Y/%m/%d')}
+📅 房租到期日：{due_date_str}
 💰 應繳金額：NT${amount:,.0f}
 🏠 房間：{room_number}
 
@@ -213,7 +242,7 @@ class ReminderService(BaseDBService):
 
 我們注意到本月房租尚未收到：
 💰 金額：NT${amount:,.0f}
-📅 到期日：{due_date.strftime('%Y/%m/%d')}（已過 {(datetime.now().date() - due_date.date()).days} 天）
+📅 到期日：{due_date_str}（已過 {max(0, overdue_days)} 天）
 
 麻煩您盡快完成轉帳，避免影響租約。
 如有特殊狀況，也歡迎與房東討論。
@@ -224,7 +253,7 @@ class ReminderService(BaseDBService):
 
 【重要提醒】您的房租已逾期：
 💰 金額：NT${amount:,.0f}
-⏰ 逾期天數：{(datetime.now().date() - due_date.date()).days} 天
+⏰ 逾期天數：{max(0, overdue_days)} 天
 
 請於 2 個工作天內完成繳納，否則房東可能需要採取進一步措施（如寄送存證信函）。
 
@@ -234,7 +263,7 @@ class ReminderService(BaseDBService):
 
 【最終通知】您的房租已嚴重逾期：
 💰 欠款金額：NT${amount:,.0f}
-⏰ 逾期天數：{(datetime.now().date() - due_date.date()).days} 天
+⏰ 逾期天數：{max(0, overdue_days)} 天
 
 此為系統最終通知。房東將於 3 天內直接聯絡您，
 若未獲回應，將依照租賃契約採取法律行動。
@@ -266,7 +295,13 @@ class ReminderService(BaseDBService):
             bool: 成功/失敗
         """
         try:
-            days_before_due = (due_date.date() - datetime.now().date()).days
+            # ✅ 修正：處理 date 類型
+            if isinstance(due_date, datetime):
+                due_date_obj = due_date
+            else:
+                due_date_obj = datetime.combine(due_date, datetime.min.time())
+            
+            days_before_due = (due_date_obj.date() - datetime.now().date()).days
             
             with self.get_connection() as conn:
                 cursor = conn.cursor()
@@ -275,7 +310,16 @@ class ReminderService(BaseDBService):
                     INSERT INTO reminder_history 
                     (tenant_id, rent_month, stage, due_date, days_before_due)
                     VALUES (%s, %s, %s, %s, %s)
-                """, (tenant_id, rent_month, stage.value, due_date, days_before_due))
+                """, (tenant_id, rent_month, stage.value, due_date_obj.date(), days_before_due))
+                
+                # ✅ 同時更新 tenant_behavior 的 total_reminders
+                cursor.execute("""
+                    INSERT INTO tenant_behavior (tenant_id, total_reminders)
+                    VALUES (%s, 1)
+                    ON CONFLICT (tenant_id) DO UPDATE SET
+                        total_reminders = tenant_behavior.total_reminders + 1,
+                        last_updated = CURRENT_TIMESTAMP
+                """, (tenant_id,))
                 
                 log_db_operation("INSERT", "reminder_history", True, 1)
                 logger.info(f"✅ 記錄催繳: {tenant_id} - {stage.value}")
@@ -302,7 +346,18 @@ class ReminderService(BaseDBService):
             paid_date: 繳款日
         """
         try:
-            delay_days = (paid_date.date() - due_date.date()).days
+            # ✅ 修正：統一日期處理
+            if isinstance(due_date, datetime):
+                due_date_obj = due_date.date()
+            else:
+                due_date_obj = due_date
+            
+            if isinstance(paid_date, datetime):
+                paid_date_obj = paid_date.date()
+            else:
+                paid_date_obj = paid_date
+            
+            delay_days = (paid_date_obj - due_date_obj).days
             is_on_time = delay_days <= 0
             
             # 取得當前檔案
@@ -340,7 +395,7 @@ class ReminderService(BaseDBService):
                 """, (tenant_id, new_avg_delay, new_on_time_rate, risk_score))
                 
                 log_db_operation("UPDATE", "tenant_behavior", True, 1)
-                logger.info(f"✅ 更新行為檔案: {tenant_id} (風險: {risk_score})")
+                logger.info(f"✅ 更新行為檔案: {tenant_id} (延遲: {delay_days}天, 風險: {risk_score})")
         
         except Exception as e:
             log_db_operation("UPDATE", "tenant_behavior", False, error=str(e))
@@ -370,6 +425,8 @@ class ReminderService(BaseDBService):
                         VALUES (%s)
                     """, (tenant_id,))
                     
+                    logger.info(f"🆕 建立新租客檔案: {tenant_id}")
+                    
                     return TenantBehaviorProfile(
                         tenant_id=tenant_id,
                         avg_payment_delay=0.0,
@@ -380,7 +437,6 @@ class ReminderService(BaseDBService):
                         preferred_reminder_days=[1, 5, 10]
                     )
                 
-                import json
                 return TenantBehaviorProfile(
                     tenant_id=row[0],
                     avg_payment_delay=row[1],
@@ -415,9 +471,12 @@ class ReminderService(BaseDBService):
                     WHERE tenant_id = %s AND rent_month = %s
                 """, (tenant_id, rent_month))
                 
-                return [ReminderStage(row[0]) for row in cursor.fetchall()]
+                stages = [ReminderStage(row[0]) for row in cursor.fetchall()]
+                log_db_operation("SELECT", "reminder_history", True, len(stages))
+                return stages
         
         except Exception as e:
+            log_db_operation("SELECT", "reminder_history", False, error=str(e))
             logger.error(f"❌ 查詢失敗: {str(e)}")
             return []
     
@@ -459,22 +518,22 @@ class ReminderService(BaseDBService):
             response_score * response_weight
         )
         
-        return int(total_score)
+        return int(min(100, max(0, total_score)))  # ✅ 確保範圍 0-100
     
     # ==================== 批次操作 ====================
     
-    def get_tenants_needing_reminder(self, due_date: datetime = None) -> List[Dict]:
+    def get_tenants_needing_reminder(self, check_date: datetime = None) -> List[Dict]:
         """
         取得需要催繳的租客列表
         
         Args:
-            due_date: 到期日（可選，默認為今天）
+            check_date: 檢查日期（可選，默認為今天）
         
         Returns:
             需要催繳的租客列表
         """
-        if due_date is None:
-            due_date = datetime.now()
+        if check_date is None:
+            check_date = datetime.now()
         
         try:
             with self.get_connection() as conn:
@@ -493,15 +552,17 @@ class ReminderService(BaseDBService):
                         ps.payment_month
                     FROM payment_schedule ps
                     LEFT JOIN tenants t ON ps.room_number = t.room_number AND t.is_active = true
-                    WHERE ps.status = 'unpaid' AND ps.due_date <= %s
-                """, (due_date,))
+                    WHERE ps.status = 'unpaid' 
+                    AND t.id IS NOT NULL
+                    ORDER BY ps.due_date
+                """)
                 
                 tenants = []
                 for row in cursor.fetchall():
                     payment_id, tenant_id, name, room, amount, due, year, month = row
                     
                     # 檢查是否需要發送提醒
-                    stage = self.should_send_reminder(str(tenant_id), due, due_date)
+                    stage = self.should_send_reminder(str(tenant_id), due, check_date)
                     
                     if stage:
                         tenants.append({
@@ -509,16 +570,57 @@ class ReminderService(BaseDBService):
                             'tenant_id': str(tenant_id),
                             'tenant_name': name,
                             'room_number': room,
-                            'amount': amount,
+                            'amount': float(amount),
                             'due_date': due,
                             'year': year,
                             'month': month,
-                            'reminder_stage': stage
+                            'reminder_stage': stage,
+                            'message': self.generate_reminder_message(name, room, float(amount), due, stage)
                         })
                 
+                log_db_operation("SELECT", "tenants_needing_reminder", True, len(tenants))
                 logger.info(f"✅ 找到 {len(tenants)} 位需要催繳的租客")
                 return tenants
         
         except Exception as e:
+            log_db_operation("SELECT", "tenants_needing_reminder", False, error=str(e))
             logger.error(f"❌ 查詢失敗: {str(e)}")
             return []
+    
+    def get_risk_report(self) -> Dict:
+        """
+        生成風險報告
+        
+        Returns:
+            風險統計字典
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    SELECT 
+                        COUNT(*) as total,
+                        AVG(risk_score) as avg_risk,
+                        SUM(CASE WHEN risk_score >= 70 THEN 1 ELSE 0 END) as high_risk,
+                        SUM(CASE WHEN risk_score >= 40 AND risk_score < 70 THEN 1 ELSE 0 END) as medium_risk,
+                        SUM(CASE WHEN risk_score < 40 THEN 1 ELSE 0 END) as low_risk
+                    FROM tenant_behavior
+                """)
+                
+                row = cursor.fetchone()
+                
+                report = {
+                    'total_tenants': int(row[0] or 0),
+                    'avg_risk_score': round(float(row[1] or 0), 2),
+                    'high_risk_count': int(row[2] or 0),
+                    'medium_risk_count': int(row[3] or 0),
+                    'low_risk_count': int(row[4] or 0)
+                }
+                
+                logger.info(f"📊 風險報告: 高風險 {report['high_risk_count']} 位")
+                return report
+        
+        except Exception as e:
+            logger.error(f"❌ 生成報告失敗: {str(e)}")
+            return {}
