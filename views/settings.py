@@ -31,8 +31,10 @@ except ImportError:
     
     def empty_state(msg, icon="", desc=""):
         st.info(f"{icon} {msg}")
+        if desc: st.caption(desc)
     
     def info_card(title, content, icon="", type="info"):
+        # ✅ 修復換行符號
         st.info(f"{icon} {title}\n\n{content}")
 
 logger = logging.getLogger(__name__)
@@ -72,7 +74,7 @@ def render_params_tab(system_service: SystemService):
             key="water_fee"
         )
         
-        if st.button("💾 儲存水費設定", key="save_water_fee"):
+        if st.button("💾 儲存水費設定", key="save_water_fee", use_container_width=True):
             try:
                 system_service.save_setting('water_fee', str(water_fee))
                 st.success("✅ 水費設定已更新")
@@ -92,7 +94,7 @@ def render_params_tab(system_service: SystemService):
             key="remind_days"
         )
         
-        if st.button("💾 儲存提醒設定", key="save_remind"):
+        if st.button("💾 儲存提醒設定", key="save_remind", use_container_width=True):
             try:
                 system_service.save_setting('remind_days', str(remind_days))
                 st.success("✅ 提醒設定已更新")
@@ -113,7 +115,7 @@ def render_params_tab(system_service: SystemService):
             key="overdue_days"
         )
         
-        if st.button("💾 儲存逾期設定", key="save_overdue"):
+        if st.button("💾 儲存逾期設定", key="save_overdue", use_container_width=True):
             try:
                 system_service.save_setting('overdue_days', str(overdue_days))
                 st.success("✅ 逾期設定已更新")
@@ -133,7 +135,7 @@ def render_params_tab(system_service: SystemService):
             key="items_per_page"
         )
         
-        if st.button("💾 儲存顯示設定", key="save_display"):
+        if st.button("💾 儲存顯示設定", key="save_display", use_container_width=True):
             try:
                 system_service.save_setting('items_per_page', str(items_per_page))
                 st.success("✅ 顯示設定已更新")
@@ -212,10 +214,15 @@ def render_export_tab(
         
         if st.button("📥 匯出應收單", key="export_payments"):
             try:
+                # ✅ 根據是否選擇月份決定查詢方式
                 if export_month:
                     payments = payment_service.get_payments_by_period(export_year, export_month)
                 else:
-                    payments = payment_service.get_payments_by_year(export_year)
+                    # 取得全年資料
+                    payments = []
+                    for month in range(1, 13):
+                        monthly = payment_service.get_payments_by_period(export_year, month)
+                        payments.extend(monthly)
                 
                 if not payments:
                     st.warning("⚠️ 沒有應收單資料")
