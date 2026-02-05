@@ -7,7 +7,7 @@
 """
 
 import re
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, Optional
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -21,11 +21,12 @@ class TransactionClassification:
     category: str
     confidence: float  # 0-1
     reasoning: str     # 分類理由
-    suggested_action: str = None  # 低信心度時的建議
+    suggested_action: Optional[str] = None  # 低信心度時的建議
+    category_display: Optional[str] = None  # 類別顯示名稱
 
 
 class ClassificationService(BaseDBService):
-    """交易分類器"""
+    """交易分類器 (繼承 BaseDBService)"""
     
     # 預設分類類別
     CATEGORIES = {
@@ -63,9 +64,22 @@ class ClassificationService(BaseDBService):
                     )
                 """)
                 
+                # ✅ 新增索引以加速查詢
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_classification_description 
+                    ON classification_feedback(description)
+                """)
+                
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_classification_date 
+                    ON classification_feedback(corrected_at DESC)
+                """)
+                
+                log_db_operation("CREATE TABLE", "classification_feedback", True, 1)
                 logger.info("✅ 分類表初始化完成")
         
         except Exception as e:
+            log_db_operation("CREATE TABLE", "classification_feedback", False, error=str(e))
             logger.error(f"❌ 初始化失敗: {str(e)}")
     
     def _load_patterns(self):
@@ -102,6 +116,8 @@ class ClassificationService(BaseDBService):
         
         # 從歷史修正中學習新模式（動態更新）
         self._update_patterns_from_feedback()
+        
+        logger.info(f"✅ 載入 {len(self.keyword_patterns)} 個分類模式")
     
     def _update_patterns_from_feedback(self):
         """從使用者修正中學習新的關鍵字"""
@@ -117,6 +133,7 @@ class ClassificationService(BaseDBService):
                     HAVING COUNT(*) >= 2
                 """)
                 
+                learned_count = 0
                 for row in cursor.fetchall():
                     desc, category = row
                     
@@ -127,7 +144,11 @@ class ClassificationService(BaseDBService):
                             pattern = re.escape(word)
                             if pattern not in self.keyword_patterns[category]:
                                 self.keyword_patterns[category].append(pattern)
+                                learned_count += 1
                                 logger.debug(f"✅ 學習新關鍵字: {word} → {category}")
+                
+                if learned_count > 0:
+                    logger.info(f"✅ 從歷史中學習 {learned_count} 個新關鍵字")
         
         except Exception as e:
             logger.error(f"❌ 學習失敗: {str(e)}")
@@ -138,8 +159,8 @@ class ClassificationService(BaseDBService):
         self,
         description: str,
         amount: float,
-        date: datetime = None,
-        tenant_id: str = None
+        date: Optional[datetime] = None,
+        tenant_id: Optional[str] = None
     ) -> TransactionClassification:
         """
         分類單筆交易
@@ -161,15 +182,28 @@ class ClassificationService(BaseDBService):
         """
         date = date or datetime.now()
         
+        # ✅ 輸入驗證
+        if not description or not description.strip():
+            logger.warning("⚠️ 交易描述為空")
+            return TransactionClassification(
+                category="other",
+                confidence=0.0,
+                reasoning="交易描述為空",
+                suggested_action="請提供交易描述",
+                category_display=self.CATEGORIES["other"]
+            )
+        
         # Step 1: 關鍵字規則匹配
         rule_result = self._classify_by_rules(description)
         
         if rule_result[1] >= 0.9:
             # 高信心度，直接返回
+            logger.info(f"🎯 高信心度分類: {description[:20]} → {rule_result[0]} ({rule_result[1]:.2f})")
             return TransactionClassification(
                 category=rule_result[0],
                 confidence=rule_result[1],
-                reasoning=f"關鍵字匹配: {rule_result[2]}"
+                reasoning=f"關鍵字匹配: {rule_result[2]}",
+                category_display=self.CATEGORIES.get(rule_result[0], rule_result[0])
             )
         
         # Step 2: 金額特徵
@@ -197,6 +231,9 @@ class ClassificationService(BaseDBService):
         suggested_action = None
         if final_confidence < 0.7:
             suggested_action = "建議人工確認分類"
+            logger.warning(f"⚠️ 低信心度分類: {description[:20]} → {final_category} ({final_confidence:.2f})")
+        else:
+            logger.info(f"✅ 分類完成: {description[:20]} → {final_category} ({final_confidence:.2f})")
         
         return TransactionClassification(
             category=final_category,
@@ -204,7 +241,8 @@ class ClassificationService(BaseDBService):
             reasoning=self._build_reasoning(
                 rule_result, amount_result, time_boost, history_result
             ),
-            suggested_action=suggested_action
+            suggested_action=suggested_action,
+            category_display=self.CATEGORIES.get(final_category, final_category)
         )
     
     def _classify_by_rules(self, description: str) -> Tuple[str, float, str]:
@@ -223,21 +261,27 @@ class ClassificationService(BaseDBService):
         
         for category, patterns in self.keyword_patterns.items():
             for pattern in patterns:
-                if re.search(pattern, description_lower):
-                    # 計算匹配強度
-                    match_len = len(re.findall(pattern, description_lower))
-                    confidence = min(0.95, 0.8 + match_len * 0.1)
-                    
-                    if confidence > best_match[1]:
-                        best_match = (category, confidence, pattern)
+                try:
+                    if re.search(pattern, description_lower, re.IGNORECASE):
+                        # 計算匹配強度
+                        matches = re.findall(pattern, description_lower, re.IGNORECASE)
+                        match_len = len(matches)
+                        confidence = min(0.95, 0.8 + match_len * 0.1)
+                        
+                        if confidence > best_match[1]:
+                            best_match = (category, confidence, pattern)
+                
+                except re.error as e:
+                    logger.warning(f"⚠️ 正則表達式錯誤: {pattern} - {e}")
+                    continue
         
         return best_match
     
     def _classify_by_amount(
         self,
         amount: float,
-        tenant_id: str = None,
-        hint_category: str = None
+        tenant_id: Optional[str] = None,
+        hint_category: Optional[str] = None
     ) -> Tuple[str, float]:
         """
         基於金額特徵分類
@@ -268,12 +312,14 @@ class ClassificationService(BaseDBService):
                     row = cursor.fetchone()
                     
                     if row:
-                        monthly_rent = row[0]
+                        monthly_rent = float(row[0])
                         
                         # 判斷
                         if abs(amount - monthly_rent) < 100:
+                            logger.debug(f"💰 金額匹配月租: {amount} ≈ {monthly_rent}")
                             return ("rent", 0.85)
                         elif abs(amount - monthly_rent * 3) < 500:
+                            logger.debug(f"💰 金額匹配押金: {amount} ≈ {monthly_rent * 3}")
                             return ("deposit", 0.9)
             
             except Exception as e:
@@ -292,7 +338,11 @@ class ClassificationService(BaseDBService):
         
         return (hint_category or "other", 0.3)
     
-    def _get_time_feature_boost(self, date: datetime, hint_category: str) -> float:
+    def _get_time_feature_boost(
+        self, 
+        date: datetime, 
+        hint_category: str
+    ) -> float:
         """
         時間特徵加成
         
@@ -310,8 +360,10 @@ class ClassificationService(BaseDBService):
         day = date.day
         
         if hint_category == "rent" and 1 <= day <= 5:
+            logger.debug(f"📅 時間加成: 月初租金 +0.1")
             return 0.1
         elif hint_category == "maintenance" and 10 <= day <= 20:
+            logger.debug(f"📅 時間加成: 月中維修 +0.05")
             return 0.05
         
         return 0.0
@@ -333,6 +385,9 @@ class ClassificationService(BaseDBService):
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
+                # ✅ 使用前 10 個字元進行模糊匹配
+                search_pattern = f"%{description[:10]}%"
+                
                 cursor.execute("""
                     SELECT actual_category, COUNT(*) as cnt
                     FROM classification_feedback
@@ -340,11 +395,12 @@ class ClassificationService(BaseDBService):
                     GROUP BY actual_category
                     ORDER BY cnt DESC
                     LIMIT 1
-                """, (f"%{description[:10]}%",))
+                """, (search_pattern,))
                 
                 row = cursor.fetchone()
                 if row and row[1] >= 2:
                     # 歷史中有 2 次以上類似記錄
+                    logger.debug(f"📚 歷史匹配: {row[0]} (出現 {row[1]} 次)")
                     return (row[0], 0.75)
         
         except Exception as e:
@@ -418,7 +474,8 @@ class ClassificationService(BaseDBService):
             reasons.append(f"關鍵字 '{rule_result[2]}' 強烈匹配")
         
         if amount_result[1] > 0.6:
-            reasons.append(f"金額特徵符合 {amount_result[0]}")
+            category_name = self.CATEGORIES.get(amount_result[0], amount_result[0])
+            reasons.append(f"金額特徵符合 {category_name}")
         
         if time_boost > 0:
             reasons.append("時間特徵加成")
@@ -453,6 +510,11 @@ class ClassificationService(BaseDBService):
             bool: 成功/失敗
         """
         try:
+            # ✅ 驗證類別是否有效
+            if actual not in self.CATEGORIES:
+                logger.warning(f"⚠️ 無效的分類類別: {actual}")
+                return False
+            
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
@@ -463,16 +525,56 @@ class ClassificationService(BaseDBService):
                 """, (description, amount, predicted, actual, confidence))
                 
                 log_db_operation("INSERT", "classification_feedback", True, 1)
-                logger.info(f"✅ 記錄反饋: {predicted} → {actual}")
+                logger.info(f"✅ 記錄反饋: {predicted} → {actual} (信心度: {confidence:.2f})")
                 
-                # 重新學習模式
-                self._update_patterns_from_feedback()
+                # 如果預測錯誤，立即重新學習
+                if predicted != actual:
+                    logger.info(f"🔄 觸發重新學習...")
+                    self._update_patterns_from_feedback()
+                
                 return True
         
         except Exception as e:
             log_db_operation("INSERT", "classification_feedback", False, error=str(e))
             logger.error(f"❌ 記錄失敗: {str(e)}")
             return False
+    
+    def batch_classify(
+        self,
+        transactions: List[Dict]
+    ) -> List[TransactionClassification]:
+        """
+        批次分類多筆交易
+        
+        Args:
+            transactions: 交易列表，每個包含 description, amount, date, tenant_id
+        
+        Returns:
+            分類結果列表
+        """
+        results = []
+        
+        for trans in transactions:
+            try:
+                result = self.classify(
+                    description=trans.get('description', ''),
+                    amount=float(trans.get('amount', 0)),
+                    date=trans.get('date'),
+                    tenant_id=trans.get('tenant_id')
+                )
+                results.append(result)
+            
+            except Exception as e:
+                logger.error(f"❌ 批次分類失敗: {e}")
+                results.append(TransactionClassification(
+                    category="other",
+                    confidence=0.0,
+                    reasoning=f"分類失敗: {str(e)[:50]}",
+                    suggested_action="請人工檢查"
+                ))
+        
+        logger.info(f"✅ 批次分類完成: {len(results)} 筆")
+        return results
     
     def get_classification_stats(self) -> Dict:
         """
@@ -495,15 +597,64 @@ class ClassificationService(BaseDBService):
                 """)
                 
                 row = cursor.fetchone()
-                if row and row[0] > 0:
-                    return {
-                        "total_corrections": row[0],
-                        "accuracy": row[1] / row[0],
-                        "avg_confidence": row[2]
-                    }
                 
-                return {"total_corrections": 0, "accuracy": 0, "avg_confidence": 0}
+                if row and row[0] > 0:
+                    total = int(row[0])
+                    correct = int(row[1])
+                    accuracy = correct / total
+                    
+                    stats = {
+                        "total_corrections": total,
+                        "correct_predictions": correct,
+                        "accuracy": round(accuracy, 3),
+                        "avg_confidence": round(float(row[2]), 3)
+                    }
+                    
+                    log_db_operation("SELECT", "classification_feedback (stats)", True, 1)
+                    logger.info(f"📊 模型準確率: {accuracy * 100:.1f}% ({correct}/{total})")
+                    
+                    return stats
+                
+                return {
+                    "total_corrections": 0, 
+                    "correct_predictions": 0,
+                    "accuracy": 0.0, 
+                    "avg_confidence": 0.0
+                }
         
         except Exception as e:
+            log_db_operation("SELECT", "classification_feedback (stats)", False, error=str(e))
             logger.error(f"❌ 統計失敗: {str(e)}")
+            return {}
+    
+    def get_category_distribution(self) -> Dict[str, int]:
+        """
+        取得各分類的分佈統計
+        
+        Returns:
+            {category: count} 字典
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    SELECT actual_category, COUNT(*) as cnt
+                    FROM classification_feedback
+                    WHERE corrected_at >= CURRENT_DATE - INTERVAL '30 days'
+                    GROUP BY actual_category
+                    ORDER BY cnt DESC
+                """)
+                
+                distribution = {}
+                for row in cursor.fetchall():
+                    category = row[0]
+                    count = int(row[1])
+                    distribution[category] = count
+                
+                logger.info(f"📊 分類分佈: {len(distribution)} 個類別")
+                return distribution
+        
+        except Exception as e:
+            logger.error(f"❌ 查詢失敗: {str(e)}")
             return {}
