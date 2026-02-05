@@ -10,7 +10,7 @@ import os
 import json
 import requests
 import streamlit as st
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict, Tuple, List
 from datetime import datetime
 
 from services.base_db import BaseDBService
@@ -18,7 +18,7 @@ from services.logger import logger, log_db_operation
 
 
 class NotificationService(BaseDBService):
-    """統一通知服務"""
+    """統一通知服務 (繼承 BaseDBService)"""
     
     def __init__(self):
         super().__init__()
@@ -26,6 +26,9 @@ class NotificationService(BaseDBService):
         # LINE 設定
         self.line_token = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN') or \
                          st.secrets.get("LINE_CHANNEL_ACCESS_TOKEN")
+        
+        if not self.line_token:
+            logger.warning("⚠️ 未設定 LINE_CHANNEL_ACCESS_TOKEN，LINE 通知功能將無法使用")
     
     # ============= 核心發送方法 =============
     
@@ -48,6 +51,10 @@ class NotificationService(BaseDBService):
             logger.warning("⚠️ 未設定 LINE_CHANNEL_ACCESS_TOKEN")
             return False
         
+        if not user_id:
+            logger.warning("⚠️ LINE User ID 為空")
+            return False
+        
         try:
             payload = {
                 'to': user_id,
@@ -67,8 +74,16 @@ class NotificationService(BaseDBService):
                 timeout=10
             )
             
-            return response.status_code == 200
+            if response.status_code == 200:
+                logger.info(f"✅ LINE 發送成功: {user_id}")
+                return True
+            else:
+                logger.error(f"❌ LINE 發送失敗: {response.status_code} - {response.text}")
+                return False
         
+        except requests.exceptions.Timeout:
+            logger.error(f"❌ LINE 發送逾時: {user_id}")
+            return False
         except Exception as e:
             logger.error(f"❌ LINE 發送失敗: {e}")
             return False
@@ -78,7 +93,7 @@ class NotificationService(BaseDBService):
     def send_electricity_bill_notification(
         self,
         period_id: int,
-        remind_date: str = None
+        remind_date: Optional[str] = None
     ) -> Tuple[bool, str, int]:
         """
         發送電費帳單通知 + 寫入 notification_logs
@@ -139,6 +154,11 @@ class NotificationService(BaseDBService):
                 
                 records = cursor.fetchall()
                 notified_count = 0
+                failed_count = 0
+                
+                if not records:
+                    logger.info("📭 沒有需要通知的租客")
+                    return True, "📭 沒有需要通知的租客", 0
                 
                 for record in records:
                     er_id, room, amount, tenant_id, tenant_name, line_id, _, year, month_start, month_end = record
@@ -149,8 +169,9 @@ class NotificationService(BaseDBService):
                         message = f"""⚡ 電費帳單通知
 
 房號：{room}
+租客：{tenant_name}
 期間：{period_text}
-金額：${amount:,} 元
+金額：NT${amount:,}
 
 請於 7 天內完成繳費。
 如有疑問，請聯繫房東。"""
@@ -158,8 +179,18 @@ class NotificationService(BaseDBService):
                         # 調用 LINE 通知
                         response = self.send_line_message(line_id, message)
                         
+                        # 準備 meta_json
+                        meta_json = json.dumps({
+                            "period_id": period_id,
+                            "electricity_record_id": er_id,
+                            "amount": float(amount),
+                            "period_text": period_text,
+                            "tenant_id": tenant_id,
+                            "tenant_name": tenant_name,
+                        }, ensure_ascii=False)
+                        
                         if response:
-                            # ✨ 更新 last_notified_at
+                            # ✅ 更新 last_notified_at
                             cursor.execute(
                                 """
                                 UPDATE electricity_records 
@@ -169,15 +200,7 @@ class NotificationService(BaseDBService):
                                 (er_id,)
                             )
                             
-                            # ✨ 新增：寫入 notification_logs 表（成功）
-                            meta_json = json.dumps({
-                                "period_id": period_id,
-                                "amount": amount,
-                                "period_text": period_text,
-                                "tenant_id": tenant_id,
-                                "tenant_name": tenant_name,
-                            }, ensure_ascii=False)
-                            
+                            # ✅ 寫入 notification_logs（成功）
                             cursor.execute(
                                 """
                                 INSERT INTO notification_logs
@@ -201,18 +224,10 @@ class NotificationService(BaseDBService):
                             )
                             
                             notified_count += 1
-                            logger.info(f"✅ 發送首次通知: {room} → notification_logs")
+                            logger.info(f"✅ 發送電費通知: {room} ({tenant_name})")
                         
                         else:
-                            # ✨ 發送失敗也記錄
-                            meta_json = json.dumps({
-                                "period_id": period_id,
-                                "amount": amount,
-                                "period_text": period_text,
-                                "tenant_id": tenant_id,
-                                "tenant_name": tenant_name,
-                            }, ensure_ascii=False)
-
+                            # ❌ 發送失敗也記錄
                             cursor.execute(
                                 """
                                 INSERT INTO notification_logs
@@ -235,16 +250,19 @@ class NotificationService(BaseDBService):
                                     meta_json
                                 )
                             )
-                            logger.warning(f"⚠️ 發送失敗: {room}")
+                            failed_count += 1
+                            logger.warning(f"⚠️ 發送失敗: {room} ({tenant_name})")
                     
                     except Exception as e:
+                        failed_count += 1
                         logger.error(f"❌ 發送失敗 {room}: {e}")
                         
-                        # ✨ 異常也記錄
+                        # ✅ 異常也記錄
                         try:
                             meta_json = json.dumps({
                                 "period_id": period_id,
-                                "amount": amount,
+                                "electricity_record_id": er_id,
+                                "amount": float(amount) if amount else 0,
                                 "period_text": period_text,
                                 "tenant_id": tenant_id,
                                 "tenant_name": tenant_name,
@@ -271,19 +289,24 @@ class NotificationService(BaseDBService):
                                     meta_json
                                 )
                             )
-                        except:
-                            pass
+                        except Exception as log_error:
+                            logger.error(f"❌ 寫入失敗日誌失敗: {log_error}")
                         
                         continue
                 
                 log_db_operation("NOTIFICATION", "electricity_records", True, notified_count)
-                logger.info(f"✅ 首次通知發送完成: {notified_count} 位租客，催繳日期設為 {remind_date}")
-                return True, f"✅ 已發送首次通知給 {notified_count} 位租客", notified_count
+                
+                summary = f"✅ 電費通知完成: 成功 {notified_count} 位"
+                if failed_count > 0:
+                    summary += f", 失敗 {failed_count} 位"
+                
+                logger.info(f"{summary}，催繳日期設為 {remind_date}")
+                return True, summary, notified_count
         
         except Exception as e:
             log_db_operation("NOTIFICATION", "electricity_records", False, error=str(e))
-            logger.error(f"❌ 自動通知失敗: {str(e)}")
-            return False, str(e), 0
+            logger.error(f"❌ 電費通知失敗: {str(e)}")
+            return False, f"❌ 電費通知失敗: {str(e)[:100]}", 0
     
     # ============= 租金催繳通知 =============
     
@@ -317,7 +340,8 @@ class NotificationService(BaseDBService):
                         ps.payment_year,
                         ps.payment_month,
                         t.id as tenant_id,
-                        tc.line_user_id
+                        tc.line_user_id,
+                        tc.notify_rent
                     FROM payment_schedule ps
                     LEFT JOIN tenants t ON ps.room_number = t.room_number AND t.is_active = true
                     LEFT JOIN tenant_contacts tc ON t.id = tc.tenant_id
@@ -329,12 +353,21 @@ class NotificationService(BaseDBService):
                 result = cursor.fetchone()
                 
                 if not result:
+                    logger.warning(f"⚠️ 租金記錄 {payment_id} 不存在或已繳款")
                     return False, "❌ 未找到租金記錄或已繳款"
                 
-                room, tenant_name, amount, due_date, year, month, tenant_id, line_id = result
+                room, tenant_name, amount, due_date, year, month, tenant_id, line_id, notify_rent = result
                 
                 if not line_id:
+                    logger.warning(f"⚠️ {tenant_name} 未設定 LINE User ID")
                     return False, f"❌ {tenant_name} 未設定 LINE User ID"
+                
+                if not notify_rent:
+                    logger.info(f"ℹ️ {tenant_name} 已關閉租金通知")
+                    return False, f"ℹ️ {tenant_name} 已關閉租金通知"
+                
+                # 計算逾期天數
+                overdue_days = (datetime.now().date() - due_date).days if isinstance(due_date, datetime) else (datetime.now().date() - due_date).days
                 
                 # 準備訊息（根據階段）
                 messages = {
@@ -345,7 +378,7 @@ class NotificationService(BaseDBService):
 本月租金即將到期：
 房號：{room}
 期間：{year}/{month}
-金額：${amount:,} 元
+金額：NT${amount:,}
 到期日：{due_date}
 
 請準時繳納，謝謝！""",
@@ -357,7 +390,8 @@ class NotificationService(BaseDBService):
 您的租金已逾期：
 房號：{room}
 期間：{year}/{month}
-金額：${amount:,} 元
+金額：NT${amount:,}
+逾期天數：{max(0, overdue_days)} 天
 
 麻煩盡快完成繳納，避免影響租約。
 如有困難，請聯繫房東。""",
@@ -369,7 +403,8 @@ class NotificationService(BaseDBService):
 您的租金已嚴重逾期：
 房號：{room}
 期間：{year}/{month}
-金額：${amount:,} 元
+金額：NT${amount:,}
+逾期天數：{max(0, overdue_days)} 天
 
 請於 2 天內完成繳納，否則將採取進一步措施。""",
                     
@@ -380,7 +415,8 @@ class NotificationService(BaseDBService):
 您的租金已逾期超過 7 天：
 房號：{room}
 期間：{year}/{month}
-金額：${amount:,} 元
+金額：NT${amount:,}
+逾期天數：{max(0, overdue_days)} 天
 
 這是最終通知，房東將直接聯絡您。
 請立即處理此事。"""
@@ -391,17 +427,20 @@ class NotificationService(BaseDBService):
                 # 發送 LINE
                 response = self.send_line_message(line_id, message)
                 
-                # 寫入 notification_logs
+                # 準備 meta_json
                 meta_json = json.dumps({
                     "payment_id": payment_id,
-                    "amount": amount,
+                    "amount": float(amount),
                     "due_date": str(due_date),
                     "year": year,
                     "month": month,
                     "tenant_id": tenant_id,
-                    "reminder_stage": reminder_stage
+                    "tenant_name": tenant_name,
+                    "reminder_stage": reminder_stage,
+                    "overdue_days": max(0, overdue_days)
                 }, ensure_ascii=False)
                 
+                # 寫入 notification_logs
                 cursor.execute(
                     """
                     INSERT INTO notification_logs
@@ -427,15 +466,55 @@ class NotificationService(BaseDBService):
                 
                 if response:
                     log_db_operation("NOTIFICATION", "payment_schedule", True, 1)
-                    logger.info(f"✅ 發送租金催繳: {room} ({reminder_stage})")
+                    logger.info(f"✅ 發送租金催繳: {room} ({tenant_name}) - {reminder_stage}")
                     return True, f"✅ 已發送 {reminder_stage} 階段催繳"
                 else:
+                    log_db_operation("NOTIFICATION", "payment_schedule", False, error="LINE API 失敗")
                     return False, "❌ LINE 發送失敗"
         
         except Exception as e:
             log_db_operation("NOTIFICATION", "payment_schedule", False, error=str(e))
             logger.error(f"❌ 租金催繳失敗: {str(e)}")
-            return False, str(e)
+            return False, f"❌ 租金催繳失敗: {str(e)[:100]}"
+    
+    # ============= 批次租金催繳 =============
+    
+    def batch_send_rent_reminders(
+        self,
+        payment_ids: List[int],
+        reminder_stage: str = "first"
+    ) -> Tuple[int, int, int]:
+        """
+        批次發送租金催繳
+        
+        Args:
+            payment_ids: 租金排程 ID 列表
+            reminder_stage: 催繳階段
+        
+        Returns:
+            (success_count, skip_count, fail_count)
+        """
+        success_count = 0
+        skip_count = 0
+        fail_count = 0
+        
+        for payment_id in payment_ids:
+            try:
+                success, msg = self.send_rent_reminder(payment_id, reminder_stage)
+                
+                if success:
+                    success_count += 1
+                elif "已關閉" in msg or "已繳款" in msg:
+                    skip_count += 1
+                else:
+                    fail_count += 1
+            
+            except Exception as e:
+                logger.error(f"❌ 批次催繳失敗 ID {payment_id}: {e}")
+                fail_count += 1
+        
+        logger.info(f"✅ 批次租金催繳: 成功 {success_count}, 跳過 {skip_count}, 失敗 {fail_count}")
+        return success_count, skip_count, fail_count
     
     # ============= 通用通知方法 =============
     
@@ -448,7 +527,7 @@ class NotificationService(BaseDBService):
         title: str,
         message: str,
         channel: str = "line",
-        meta_data: Dict = None
+        meta_data: Optional[Dict] = None
     ) -> Tuple[bool, str]:
         """
         發送自定義通知 + 寫入 notification_logs
@@ -469,11 +548,21 @@ class NotificationService(BaseDBService):
         try:
             # 發送通知
             success = False
+            error_msg = None
+            
             if channel == "line":
                 success = self.send_line_message(recipient_id, message)
+                error_msg = None if success else "LINE API 回應失敗"
             elif channel == "email":
                 # TODO: 實作 Email 發送
-                pass
+                error_msg = "Email 功能尚未實作"
+                logger.warning("⚠️ Email 功能尚未實作")
+            elif channel == "sms":
+                # TODO: 實作 SMS 發送
+                error_msg = "SMS 功能尚未實作"
+                logger.warning("⚠️ SMS 功能尚未實作")
+            else:
+                error_msg = f"不支援的通道: {channel}"
             
             # 寫入 notification_logs
             with self.get_connection() as conn:
@@ -499,17 +588,82 @@ class NotificationService(BaseDBService):
                         message,
                         channel,
                         'sent' if success else 'failed',
-                        None if success else f'{channel.upper()} API 回應失敗',
+                        error_msg,
                         meta_json
                     )
                 )
             
             if success:
+                log_db_operation("NOTIFICATION", "custom", True, 1)
                 logger.info(f"✅ 發送自定義通知: {title}")
                 return True, "✅ 發送成功"
             else:
-                return False, f"❌ {channel.upper()} 發送失敗"
+                log_db_operation("NOTIFICATION", "custom", False, error=error_msg)
+                return False, f"❌ {error_msg or '發送失敗'}"
         
         except Exception as e:
+            log_db_operation("NOTIFICATION", "custom", False, error=str(e))
             logger.error(f"❌ 自定義通知失敗: {str(e)}")
-            return False, str(e)
+            return False, f"❌ {str(e)[:100]}"
+    
+    # ============= 查詢通知歷史 =============
+    
+    def get_notification_history(
+        self,
+        category: Optional[str] = None,
+        room_number: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 100
+    ) -> List[Dict]:
+        """
+        查詢通知歷史
+        
+        Args:
+            category: 類別篩選
+            room_number: 房號篩選
+            status: 狀態篩選 (sent/failed/pending)
+            limit: 筆數限制
+        
+        Returns:
+            通知歷史列表
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                conditions = ["1=1"]
+                params = []
+                
+                if category:
+                    conditions.append("category = %s")
+                    params.append(category)
+                if room_number:
+                    conditions.append("room_number = %s")
+                    params.append(room_number)
+                if status:
+                    conditions.append("status = %s")
+                    params.append(status)
+                
+                params.append(limit)
+                
+                cursor.execute(f"""
+                    SELECT 
+                        id, category, recipient_type, room_number,
+                        notification_type, title, channel, status,
+                        sent_at, error_message, meta_json
+                    FROM notification_logs
+                    WHERE {' AND '.join(conditions)}
+                    ORDER BY sent_at DESC, created_at DESC
+                    LIMIT %s
+                """, params)
+                
+                columns = [desc[0] for desc in cursor.description]
+                rows = cursor.fetchall()
+                
+                log_db_operation("SELECT", "notification_logs", True, len(rows))
+                return [dict(zip(columns, row)) for row in rows]
+        
+        except Exception as e:
+            log_db_operation("SELECT", "notification_logs", False, error=str(e))
+            logger.error(f"❌ 查詢通知歷史失敗: {str(e)}")
+            return []
