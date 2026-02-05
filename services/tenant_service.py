@@ -5,6 +5,8 @@
 ✅ 常量驗證
 ✅ 完整統計功能
 ✅ 與其他模組兼容
+✅ SQL 注入防護
+✅ DataFrame 安全處理
 """
 
 import pandas as pd
@@ -94,10 +96,22 @@ class TenantService(BaseDBService):
         try:
             df = self.get_tenants(active_only=not include_inactive)
             
-            if df.empty:
+            # ✅ 確保 df 是 DataFrame
+            if not isinstance(df, pd.DataFrame):
+                logger.error(f"❌ 回傳類型錯誤: 期望 DataFrame，實際 {type(df)}")
                 return []
             
-            return df.to_dict('records')
+            if df.empty:
+                logger.info("📭 無房客記錄")
+                return []
+            
+            result = df.to_dict('records')
+            logger.info(f"✅ 取得 {len(result)} 筆房客資料")
+            return result
+        
+        except AttributeError as e:
+            logger.error(f"❌ DataFrame 操作錯誤: {str(e)}", exc_info=True)
+            return []
         
         except Exception as e:
             logger.error(f"❌ 取得所有房客失敗: {str(e)}", exc_info=True)
@@ -110,7 +124,24 @@ class TenantService(BaseDBService):
         Returns:
             有效房客列表
         """
-        return self.get_all_tenants(include_inactive=False)
+        try:
+            df = self.get_tenants(active_only=True)
+            
+            if not isinstance(df, pd.DataFrame):
+                logger.error(f"❌ 回傳類型錯誤: 期望 DataFrame，實際 {type(df)}")
+                return []
+            
+            if df.empty:
+                logger.info("📭 無有效房客")
+                return []
+            
+            result = df.to_dict('records')
+            logger.info(f"✅ 取得 {len(result)} 筆有效房客")
+            return result
+        
+        except Exception as e:
+            logger.error(f"❌ 取得有效房客失敗: {str(e)}", exc_info=True)
+            return []
     
     def get_tenant_by_id(self, tenant_id: int) -> Optional[Dict]:
         """
@@ -146,7 +177,7 @@ class TenantService(BaseDBService):
         
         except Exception as e:
             log_db_operation("SELECT", "tenants", False, error=str(e))
-            logger.error(f"❌ 查詢失敗: {str(e)}")
+            logger.error(f"❌ 查詢失敗: {str(e)}", exc_info=True)
             return None
     
     def get_tenant_by_room(self, room_number: str) -> Optional[Dict]:
@@ -183,7 +214,7 @@ class TenantService(BaseDBService):
         
         except Exception as e:
             log_db_operation("SELECT", "tenants", False, error=str(e))
-            logger.error(f"❌ 查詢失敗: {str(e)}")
+            logger.error(f"❌ 查詢失敗: {str(e)}", exc_info=True)
             return None
     
     # ==================== 新增操作 ====================
@@ -265,7 +296,7 @@ class TenantService(BaseDBService):
         
         except Exception as e:
             log_db_operation("INSERT", "tenants", False, error=str(e))
-            logger.error(f"❌ 新增失敗: {str(e)}")
+            logger.error(f"❌ 新增失敗: {str(e)}", exc_info=True)
             return False, f"新增失敗: {str(e)[:100]}"
     
     def create_tenant(self, tenant_data: Dict) -> Optional[int]:
@@ -390,7 +421,7 @@ class TenantService(BaseDBService):
         
         except Exception as e:
             log_db_operation("UPDATE", "tenants", False, error=str(e))
-            logger.error(f"❌ 更新失敗: {str(e)}")
+            logger.error(f"❌ 更新失敗: {str(e)}", exc_info=True)
             return False, f"更新失敗: {str(e)[:100]}"
     
     # ==================== 刪除操作 ====================
@@ -426,7 +457,7 @@ class TenantService(BaseDBService):
         
         except Exception as e:
             log_db_operation("UPDATE", "tenants", False, error=str(e))
-            logger.error(f"❌ 刪除失敗: {str(e)}")
+            logger.error(f"❌ 刪除失敗: {str(e)}", exc_info=True)
             return False, f"刪除失敗: {str(e)[:100]}"
     
     # ==================== 輔助方法 ====================
@@ -456,7 +487,7 @@ class TenantService(BaseDBService):
                 return is_available
         
         except Exception as e:
-            logger.error(f"❌ 檢查失敗: {str(e)}")
+            logger.error(f"❌ 檢查失敗: {str(e)}", exc_info=True)
             return False
     
     def get_available_rooms(self) -> List[str]:
@@ -485,7 +516,7 @@ class TenantService(BaseDBService):
         
         except Exception as e:
             log_db_operation("SELECT", "tenants (available rooms)", False, error=str(e))
-            logger.error(f"❌ 查詢失敗: {str(e)}")
+            logger.error(f"❌ 查詢失敗: {str(e)}", exc_info=True)
             return []
     
     def get_vacant_rooms(self, all_rooms: Optional[List[str]] = None) -> List[str]:
@@ -546,7 +577,7 @@ class TenantService(BaseDBService):
         
         except Exception as e:
             log_db_operation("SELECT", "tenants (statistics)", False, error=str(e))
-            logger.error(f"❌ 統計失敗: {str(e)}")
+            logger.error(f"❌ 統計失敗: {str(e)}", exc_info=True)
             return {
                 'total_tenants': 0,
                 'total_rent': 0.0,
@@ -590,15 +621,21 @@ class TenantService(BaseDBService):
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
+                # ✅ 使用 make_interval 更安全
                 cursor.execute("""
-                    SELECT id, room_number, tenant_name, phone, lease_end,
-                           (lease_end - CURRENT_DATE) as days_remaining
+                    SELECT 
+                        id, 
+                        room_number, 
+                        tenant_name, 
+                        phone, 
+                        lease_end,
+                        (lease_end - CURRENT_DATE) as days_remaining
                     FROM tenants
                     WHERE is_active = true 
-                    AND lease_end <= CURRENT_DATE + INTERVAL '%s days'
+                    AND lease_end <= CURRENT_DATE + make_interval(days => %s)
                     AND lease_end >= CURRENT_DATE
                     ORDER BY lease_end
-                """ % days)
+                """, (days,))
                 
                 columns = [desc[0] for desc in cursor.description]
                 rows = cursor.fetchall()
@@ -610,7 +647,7 @@ class TenantService(BaseDBService):
         
         except Exception as e:
             log_db_operation("SELECT", "tenants (expiring leases)", False, error=str(e))
-            logger.error(f"❌ 查詢失敗: {str(e)}")
+            logger.error(f"❌ 查詢失敗: {str(e)}", exc_info=True)
             return []
     
     def check_lease_expiry(self, days_ahead: int = 45) -> List[Dict]:
@@ -642,9 +679,12 @@ if __name__ == "__main__":
     # 測試取得所有房客 (List)
     print("2. 所有房客 (List):")
     tenants = service.get_all_tenants()
-    for tenant in tenants[:3]:
-        print(f"   {tenant['room_number']} - {tenant['tenant_name']}")
-    print(f"   共 {len(tenants)} 筆\n")
+    if tenants:
+        for tenant in tenants[:3]:
+            print(f"   {tenant['room_number']} - {tenant['tenant_name']}")
+        print(f"   共 {len(tenants)} 筆\n")
+    else:
+        print("   無房客資料\n")
     
     # 測試統計
     print("3. 租客統計:")
@@ -653,12 +693,20 @@ if __name__ == "__main__":
         print(f"   {key}: {value}")
     
     # 測試即將到期
-    print("\n4. 即將到期租約:")
+    print("\n4. 即將到期租約 (45天內):")
     expiring = service.check_lease_expiry(45)
-    for lease in expiring:
-        print(f"   {lease['room_number']} - {lease['tenant_name']} (剩餘 {lease['days_remaining']} 天)")
+    if expiring:
+        for lease in expiring:
+            print(f"   {lease['room_number']} - {lease['tenant_name']} (剩餘 {lease['days_remaining']} 天)")
+    else:
+        print("   無即將到期的租約")
     
     # 測試空房
     print("\n5. 可用房間:")
     vacant = service.get_vacant_rooms()
-    print(f"   {', '.join(vacant) if vacant else '無空房'}")
+    if vacant:
+        print(f"   {', '.join(vacant)}")
+    else:
+        print("   無空房")
+    
+    print("\n✅ 測試完成")
