@@ -1,32 +1,42 @@
-# views/rent.py v2.1 - 修正版（使用正確的 Service 方法）
 """
-租金管理頁面 v2.1
-✅ 修正：使用正確的 PaymentService 方法建立排程
-✅ 修正：st.metric 空 label 警告
-✅ 修正：use_container_width 改為 width
+租金管理頁面 v3.0 (Service 架構完全重構)
+✅ 完全移除 db 依賴
+✅ 使用正確的 Service 方法
+✅ 優化錯誤處理
+✅ 統一入口函數
 """
 import streamlit as st
 from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
 from services.payment_service import PaymentService
-from services.logger import logger
-from repository.tenant_repository import TenantRepository
+from services.tenant_service import TenantService
+from typing import List, Dict
 import pandas as pd
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 # ============================================
-# 主入口（供 main.py 呼叫）
+# 主入口
 # ============================================
-def render(db):
-    """主入口函式（供 main.py 動態載入使用）
-    Args:
-        db: SupabaseDB 實例（由 main.py 傳入）
-    """
+def render():
+    """主入口函式（供 main.py 動態載入使用）"""
     render_rent_page()
+
+
+def show():
+    """Streamlit 頁面入口"""
+    render()
+
 
 def render_rent_page():
     """渲染租金管理主頁面"""
     st.title("💰 租金管理")
-    service = PaymentService()
+    
+    # ✅ 初始化 Services
+    payment_service = PaymentService()
+    tenant_service = TenantService()
     
     # 頁籤
     tab1, tab2, tab3, tab4 = st.tabs([
@@ -37,38 +47,34 @@ def render_rent_page():
     ])
     
     with tab1:
-        render_batch_schedule_tab(service)  # ✅ 使用增強版
+        render_batch_schedule_tab(payment_service, tenant_service)
     with tab2:
-        render_monthly_summary_tab(service)
+        render_monthly_summary_tab(payment_service, tenant_service)
     with tab3:
-        render_payment_management_tab(service)
+        render_payment_management_tab(payment_service, tenant_service)
     with tab4:
-        render_reports_tab(service)
+        render_reports_tab(payment_service, tenant_service)
 
-# ==================== Tab 1: 批量建立排程（增強版 + 修正）====================
-def render_batch_schedule_tab(service: PaymentService):
-    """批量建立排程頁籤 v2.1 - 修正版"""
+
+# ==================== Tab 1: 批量建立排程 ====================
+def render_batch_schedule_tab(payment_service: PaymentService, tenant_service: TenantService):
+    """批量建立排程頁籤 v3.0"""
     
-    st.subheader("📅 批量建立月租金排程 v2.1")
+    st.subheader("📅 批量建立月租金排程 v3.0")
     st.caption("💡 選擇特定房間，一次建立多個月份的租金記錄")
     
     st.divider()
     
     # === 載入房客資料 ===
     try:
-        tenant_repo = TenantRepository()
-        tenants = tenant_repo.get_active_tenants()
+        tenants = tenant_service.get_all_tenants()
         
         if not tenants:
             st.warning("⚠️ 尚無房客資料，請先前往「👥 房客管理」新增房客")
             return
         
         # 按房號分組
-        tenants_by_room = {}
-        for t in tenants:
-            room = t['room_number']
-            tenants_by_room[room] = t
-        
+        tenants_by_room = {t['room_number']: t for t in tenants}
         room_list = sorted(tenants_by_room.keys())
     
     except Exception as e:
@@ -98,7 +104,7 @@ def render_batch_schedule_tab(service: PaymentService):
     
     # 初始化 session state
     if 'batch_mode' not in st.session_state:
-        st.session_state.batch_mode = 'select'  # 預設為選擇模式
+        st.session_state.batch_mode = 'select'
     
     if mode_all:
         st.session_state.batch_mode = 'all'
@@ -110,13 +116,12 @@ def render_batch_schedule_tab(service: PaymentService):
     
     st.divider()
     
-    # === 房間選擇（選擇模式）===
+    # === 房間選擇 ===
     selected_rooms = []
     
     if st.session_state.batch_mode == 'select':
         st.markdown("### 🏠 選擇房間")
         
-        # 多選房號
         selected_rooms = st.multiselect(
             "請選擇要建立租金記錄的房間（可多選）",
             options=room_list,
@@ -137,7 +142,7 @@ def render_batch_schedule_tab(service: PaymentService):
             tenant = tenants_by_room[room]
             with cols[idx % 4]:
                 st.metric(
-                    label=room,
+                    label=f"房間 {room}",
                     value=f"${tenant['base_rent']:,.0f}",
                     delta=tenant['tenant_name']
                 )
@@ -219,10 +224,9 @@ def render_batch_schedule_tab(service: PaymentService):
     
     total_records = len(selected_rooms) * num_months
     
-    # ✅ 修正：給 metric 一個有意義的 label
     st.metric(
-        label="預計建立",
-        value=f"{total_records} 筆租金記錄",
+        label="預計建立記錄",
+        value=f"{total_records} 筆",
         delta=f"{len(selected_rooms)} 房間 × {num_months} 月"
     )
     
@@ -283,36 +287,21 @@ def render_batch_schedule_tab(service: PaymentService):
                             status_text.text(f"處理中... {current}/{total_items} ({room} - {month_info['display']})")
                             
                             try:
-                                # ✅ 修正：使用正確的方式建立單一排程
-                                # 檢查是否已存在
-                                if service.payment_repo.schedule_exists(room, month_info['year'], month_info['month']):
-                                    skip_count += 1
-                                    continue
+                                # ✅ 使用 PaymentService 建立排程
+                                ok, msg = payment_service.create_monthly_schedule(
+                                    room_number=room,
+                                    year=month_info['year'],
+                                    month=month_info['month']
+                                )
                                 
-                                # 計算租金
-                                rent_calc = service.calculate_monthly_rent(tenant, month_info['month'])
-                                
-                                # 建立排程
-                                due_date = datetime(month_info['year'], month_info['month'], 5)
-                                
-                                schedule_data = {
-                                    'room_number': room,
-                                    'tenant_name': tenant['tenant_name'],
-                                    'payment_year': month_info['year'],
-                                    'payment_month': month_info['month'],
-                                    'amount': rent_calc.final_amount,
-                                    'payment_method': tenant.get('payment_method', 'cash'),
-                                    'due_date': due_date,
-                                    'status': 'unpaid'
-                                }
-                                
-                                schedule_id = service.payment_repo.create_schedule(schedule_data)
-                                
-                                if schedule_id:
-                                    success_count += 1
+                                if ok:
+                                    if "已存在" in msg:
+                                        skip_count += 1
+                                    else:
+                                        success_count += 1
                                 else:
                                     fail_count += 1
-                                    error_messages.append(f"{room} ({month_info['display']}): 建立失敗")
+                                    error_messages.append(f"{room} ({month_info['display']}): {msg}")
                             
                             except Exception as e:
                                 fail_count += 1
@@ -365,28 +354,26 @@ def render_batch_schedule_tab(service: PaymentService):
             st.rerun()
 
 
-# ==================== Tab 2-4: 保持原有功能 ====================
-def render_monthly_summary_tab(service: PaymentService):
-    """本月摘要頁籤（含房號篩選和單獨標記）"""
+# ==================== Tab 2: 本月摘要 ====================
+def render_monthly_summary_tab(payment_service: PaymentService, tenant_service: TenantService):
+    """本月摘要頁籤"""
     st.subheader("📊 本月租金收款摘要")
     
     # === 期間與篩選 ===
     col1, col2, col3 = st.columns([2, 2, 3])
     
     with col1:
-        year = st.selectbox("年份", range(2020, 2031), index=6)  # 預設 2026
+        year = st.selectbox("年份", range(2020, 2031), index=date.today().year - 2020, key="summary_year")
     
     with col2:
-        month = st.selectbox("月份", range(1, 13), index=datetime.now().month - 1)
+        month = st.selectbox("月份", range(1, 13), index=date.today().month - 1, key="summary_month")
     
     with col3:
         # 取得所有房間列表
         try:
-            tenant_repo = TenantRepository()
-            tenants = tenant_repo.get_active_tenants()
+            tenants = tenant_service.get_all_tenants()
             room_list = sorted(set([t['room_number'] for t in tenants]))
             
-            # 房號篩選（含「全部」選項）
             selected_room = st.selectbox(
                 "🏠 房號篩選",
                 options=["全部"] + room_list,
@@ -400,50 +387,37 @@ def render_monthly_summary_tab(service: PaymentService):
     try:
         # 根據篩選條件取得資料
         if selected_room == "全部":
-            summary = service.get_payment_summary(year, month)
-            payments = service.payment_repo.get_by_period(year, month)
+            summary = payment_service.get_monthly_summary(year, month)
+            payments = payment_service.get_payments_by_period(year, month)
         else:
-            # 取得單一房間的資料
-            payments = service.payment_repo.get_by_room_and_period(selected_room, year, month)
+            payments = payment_service.get_room_payments(selected_room, year, month)
             
             # 計算單一房間的摘要
             df = pd.DataFrame(payments) if payments else pd.DataFrame()
             if not df.empty:
-                from dataclasses import dataclass
-                @dataclass
-                class RoomSummary:
-                    total_expected: float
-                    total_received: float
-                    unpaid_count: int
-                    overdue_count: int
-                    collection_rate: float
-                
                 total_expected = df['amount'].sum()
                 paid_df = df[df['status'] == 'paid']
-                total_received = paid_df['paid_amount'].sum() if not paid_df.empty else 0
+                total_received = paid_df['paid_amount'].sum() if not paid_df.empty and 'paid_amount' in paid_df.columns else 0
                 unpaid_count = len(df[df['status'] == 'unpaid'])
                 overdue_count = len(df[df['status'] == 'overdue'])
                 collection_rate = total_received / total_expected if total_expected > 0 else 0
                 
-                summary = RoomSummary(
-                    total_expected=total_expected,
-                    total_received=total_received,
-                    unpaid_count=unpaid_count,
-                    overdue_count=overdue_count,
-                    collection_rate=collection_rate
-                )
+                # 創建簡單的摘要對象
+                summary = {
+                    'total_expected': total_expected,
+                    'total_received': total_received,
+                    'unpaid_count': unpaid_count,
+                    'overdue_count': overdue_count,
+                    'collection_rate': collection_rate
+                }
             else:
-                # 無資料時的空摘要
-                from dataclasses import dataclass
-                @dataclass
-                class RoomSummary:
-                    total_expected: float = 0
-                    total_received: float = 0
-                    unpaid_count: int = 0
-                    overdue_count: int = 0
-                    collection_rate: float = 0
-                
-                summary = RoomSummary()
+                summary = {
+                    'total_expected': 0,
+                    'total_received': 0,
+                    'unpaid_count': 0,
+                    'overdue_count': 0,
+                    'collection_rate': 0
+                }
         
         # === 顯示指標 ===
         col1, col2, col3, col4 = st.columns(4)
@@ -451,37 +425,41 @@ def render_monthly_summary_tab(service: PaymentService):
         with col1:
             st.metric(
                 "應收總額",
-                f"${summary.total_expected:,.0f}",
+                f"${summary['total_expected']:,.0f}" if isinstance(summary, dict) else f"${summary.total_expected:,.0f}",
                 help="本月應繳租金總額"
             )
         
         with col2:
+            total_received = summary['total_received'] if isinstance(summary, dict) else summary.total_received
+            collection_rate = summary['collection_rate'] if isinstance(summary, dict) else summary.collection_rate
             st.metric(
                 "實收總額",
-                f"${summary.total_received:,.0f}",
-                delta=f"{summary.collection_rate:.1%}",
+                f"${total_received:,.0f}",
+                delta=f"{collection_rate:.1%}",
                 help="已收到的租金金額與收款率"
             )
         
         with col3:
+            unpaid_count = summary['unpaid_count'] if isinstance(summary, dict) else summary.unpaid_count
             st.metric(
                 "待收",
-                f"{summary.unpaid_count} 筆",
+                f"{unpaid_count} 筆",
                 help="尚未繳款的租金記錄數"
             )
         
         with col4:
+            overdue_count = summary['overdue_count'] if isinstance(summary, dict) else summary.overdue_count
             st.metric(
                 "逾期",
-                f"{summary.overdue_count} 筆",
-                delta="-" if summary.overdue_count > 0 else "正常",
+                f"{overdue_count} 筆",
+                delta="-" if overdue_count > 0 else "正常",
                 delta_color="inverse",
                 help="已超過到期日的未繳款記錄"
             )
         
         # 進度條
-        st.progress(summary.collection_rate)
-        st.caption(f"收款進度：{summary.collection_rate:.1%}")
+        st.progress(collection_rate)
+        st.caption(f"收款進度：{collection_rate:.1%}")
         
         st.divider()
         
@@ -509,11 +487,12 @@ def render_monthly_summary_tab(service: PaymentService):
         df['status_display'] = df['status'].map(status_map).fillna(df['status'])
         
         # 顯示表格
+        display_cols = ['room_number', 'tenant_name', 'amount', 'due_date', 'status_display']
+        if 'payment_method' in df.columns:
+            display_cols.append('payment_method')
+        
         st.dataframe(
-            df[[
-                'room_number', 'tenant_name', 'amount',
-                'due_date', 'status_display', 'payment_method'
-            ]].rename(columns={
+            df[display_cols].rename(columns={
                 'room_number': '房號',
                 'tenant_name': '房客',
                 'amount': '應繳金額',
@@ -530,23 +509,14 @@ def render_monthly_summary_tab(service: PaymentService):
         
         if not unpaid_df.empty:
             st.divider()
+            st.subheader(f"✅ {'批量標記已繳' if selected_room == '全部' else f'{selected_room} 房標記已繳'}")
             
-            if selected_room == "全部":
-                st.subheader("✅ 批量標記已繳")
-            else:
-                st.subheader(f"✅ {selected_room} 房標記已繳")
-            
-            col1, col2, col3 = st.columns([4, 2, 2])
+            col1, col2 = st.columns([3, 1])
             
             with col1:
-                # 初始化 session state
-                if 'selected_monthly' not in st.session_state:
-                    st.session_state.selected_monthly = []
-                
                 selected_ids = st.multiselect(
                     "選擇要標記為已繳的項目（可多選）",
                     options=unpaid_df['id'].tolist(),
-                    default=st.session_state.selected_monthly,
                     format_func=lambda x: (
                         f"{unpaid_df[unpaid_df['id']==x]['room_number'].values[0]} - "
                         f"{unpaid_df[unpaid_df['id']==x]['tenant_name'].values[0]} "
@@ -554,37 +524,10 @@ def render_monthly_summary_tab(service: PaymentService):
                     ),
                     key="monthly_multiselect"
                 )
-                
-                st.session_state.selected_monthly = selected_ids
             
             with col2:
-                paid_amount = st.number_input(
-                    "繳款金額",
-                    min_value=0.0,
-                    step=100.0,
-                    help="留空則使用應繳金額",
-                    key="monthly_paid_amount"
-                )
-            
-            with col3:
                 st.write("")
                 st.write("")
-            
-            # 快速選擇按鈕
-            col_btn1, col_btn2, col_btn3 = st.columns(3)
-            
-            with col_btn1:
-                if st.button("📌 全選", use_container_width=True, key="monthly_select_all"):
-                    st.session_state.selected_monthly = unpaid_df['id'].tolist()
-                    st.rerun()
-            
-            with col_btn2:
-                if st.button("🔄 清除", use_container_width=True, key="monthly_clear"):
-                    st.session_state.selected_monthly = []
-                    st.rerun()
-            
-            # 標記按鈕
-            with col_btn3:
                 if st.button(
                     f"✅ 標記 ({len(selected_ids)})",
                     type="primary",
@@ -594,14 +537,10 @@ def render_monthly_summary_tab(service: PaymentService):
                 ):
                     with st.spinner("處理中..."):
                         try:
-                            results = service.batch_mark_paid(
-                                selected_ids,
-                                paid_amount if paid_amount > 0 else None
-                            )
+                            results = payment_service.batch_mark_paid(selected_ids)
                             
                             if results['success'] > 0:
                                 st.success(f"✅ 成功標記 {results['success']} 筆")
-                                st.session_state.selected_monthly = []
                                 st.rerun()
                             
                             if results['failed'] > 0:
@@ -614,8 +553,10 @@ def render_monthly_summary_tab(service: PaymentService):
         st.error(f"❌ 載入摘要失敗: {str(e)}")
         logger.error(f"載入摘要錯誤: {str(e)}", exc_info=True)
 
-def render_payment_management_tab(service: PaymentService):
-    """收款管理頁籤（含房號篩選）"""
+
+# ==================== Tab 3: 收款管理 ====================
+def render_payment_management_tab(payment_service: PaymentService, tenant_service: TenantService):
+    """收款管理頁籤"""
     st.subheader("💳 收款管理")
     
     # === 篩選條件 ===
@@ -629,10 +570,8 @@ def render_payment_management_tab(service: PaymentService):
         )
     
     with col2:
-        # 房號篩選
         try:
-            tenant_repo = TenantRepository()
-            tenants = tenant_repo.get_active_tenants()
+            tenants = tenant_service.get_all_tenants()
             room_list = sorted(set([t['room_number'] for t in tenants]))
             
             selected_room = st.selectbox(
@@ -646,17 +585,17 @@ def render_payment_management_tab(service: PaymentService):
     
     # === 載入資料 ===
     try:
-        # 先根據狀態取得資料
+        # 根據狀態取得資料
         if status_filter == "未繳":
-            payments = service.get_unpaid_payments()
+            payments = payment_service.get_unpaid_payments()
         elif status_filter == "逾期":
-            payments = service.get_overdue_payments()
+            payments = payment_service.get_overdue_payments()
         elif status_filter == "已繳":
-            payments = service.payment_repo.get_by_status('paid')
+            payments = payment_service.get_paid_payments()
         else:
-            payments = service.payment_repo.get_all_payments()
+            payments = payment_service.get_all_payments()
         
-        # 再根據房號篩選
+        # 根據房號篩選
         if selected_room != "全部":
             payments = [p for p in payments if p['room_number'] == selected_room]
         
@@ -666,18 +605,19 @@ def render_payment_management_tab(service: PaymentService):
         
         # 轉換為 DataFrame
         df = pd.DataFrame(payments)
-        df['due_date'] = pd.to_datetime(df['due_date']).dt.strftime('%Y-%m-%d')
+        if 'due_date' in df.columns:
+            df['due_date'] = pd.to_datetime(df['due_date']).dt.strftime('%Y-%m-%d')
         
         # 狀態顯示
         status_map = {'unpaid': '⏳ 未繳', 'paid': '✅ 已繳', 'overdue': '🚨 逾期'}
         df['status_display'] = df['status'].map(status_map).fillna(df['status'])
         
         # 顯示表格
+        display_cols = ['room_number', 'tenant_name', 'payment_year', 'payment_month', 'amount', 'due_date', 'status_display']
+        available_cols = [col for col in display_cols if col in df.columns]
+        
         st.dataframe(
-            df[[
-                'room_number', 'tenant_name', 'payment_year',
-                'payment_month', 'amount', 'due_date', 'status_display'
-            ]].rename(columns={
+            df[available_cols].rename(columns={
                 'room_number': '房號',
                 'tenant_name': '房客',
                 'payment_year': '年份',
@@ -690,12 +630,12 @@ def render_payment_management_tab(service: PaymentService):
             hide_index=True
         )
         
-        # === 批量標記功能（只在「未繳」或「逾期」時顯示）===
+        # === 批量標記功能 ===
         if status_filter in ["未繳", "逾期"]:
             st.divider()
-            st.subheader("批量標記已繳")
+            st.subheader("✅ 批量標記已繳")
             
-            col1, col2, col3 = st.columns([3, 2, 2])
+            col1, col2 = st.columns([3, 1])
             
             with col1:
                 selected_ids = st.multiselect(
@@ -705,28 +645,35 @@ def render_payment_management_tab(service: PaymentService):
                         f"{df[df['id']==x]['room_number'].values[0]} - "
                         f"{df[df['id']==x]['payment_year'].values[0]}/"
                         f"{df[df['id']==x]['payment_month'].values[0]:02d}"
-                    )
+                    ),
+                    key="management_multiselect"
                 )
             
             with col2:
-                paid_amount = st.number_input("繳款金額", min_value=0.0, step=100.0)
-            
-            with col3:
                 st.write("")
                 st.write("")
-                if st.button("✅ 標記為已繳", disabled=len(selected_ids) == 0):
+                if st.button(
+                    f"✅ 標記 ({len(selected_ids)})",
+                    type="primary",
+                    disabled=len(selected_ids) == 0,
+                    use_container_width=True
+                ):
                     with st.spinner("處理中..."):
-                        results = service.batch_mark_paid(selected_ids, paid_amount if paid_amount > 0 else None)
-                        st.success(
-                            f"✅ 完成！成功 {results['success']} 筆，失敗 {results['failed']} 筆"
-                        )
-                        st.rerun()
+                        try:
+                            results = payment_service.batch_mark_paid(selected_ids)
+                            st.success(f"✅ 完成！成功 {results['success']} 筆，失敗 {results['failed']} 筆")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ 標記失敗: {str(e)}")
+                            logger.error(f"批量標記失敗: {str(e)}", exc_info=True)
     
     except Exception as e:
         st.error(f"❌ 載入資料失敗: {str(e)}")
         logger.error(f"收款管理錯誤: {str(e)}", exc_info=True)
 
-def render_reports_tab(service: PaymentService):
+
+# ==================== Tab 4: 報表分析 ====================
+def render_reports_tab(payment_service: PaymentService, tenant_service: TenantService):
     """報表分析頁籤"""
     st.subheader("📈 報表分析")
     
@@ -736,21 +683,22 @@ def render_reports_tab(service: PaymentService):
     )
     
     if report_type == "月度收款趨勢":
-        render_monthly_trend_report(service)
+        render_monthly_trend_report(payment_service)
     elif report_type == "房客繳款歷史":
-        render_tenant_history_report(service)
+        render_tenant_history_report(payment_service, tenant_service)
     elif report_type == "年度統計":
-        render_annual_report(service)
+        render_annual_report(payment_service)
 
-def render_monthly_trend_report(service: PaymentService):
+
+def render_monthly_trend_report(payment_service: PaymentService):
     """月度趨勢報表"""
     st.info("🚧 月度趨勢報表開發中...")
 
-def render_tenant_history_report(service: PaymentService):
+
+def render_tenant_history_report(payment_service: PaymentService, tenant_service: TenantService):
     """房客繳款歷史"""
     try:
-        tenant_repo = TenantRepository()
-        tenants = tenant_repo.get_active_tenants()
+        tenants = tenant_service.get_all_tenants()
         
         if not tenants:
             st.warning("沒有活躍房客")
@@ -769,15 +717,16 @@ def render_tenant_history_report(service: PaymentService):
         )
         
         # 載入歷史
-        history = service.get_tenant_payment_history(selected_room, limit=12)
+        history = payment_service.get_tenant_history(selected_room, limit=12)
         
         if history:
             df = pd.DataFrame(history)
+            
+            available_cols = ['payment_year', 'payment_month', 'amount', 'status', 'paid_date', 'due_date']
+            display_cols = [col for col in available_cols if col in df.columns]
+            
             st.dataframe(
-                df[[
-                    'payment_year', 'payment_month', 'amount',
-                    'status', 'paid_date', 'due_date'
-                ]],
+                df[display_cols],
                 use_container_width=True,
                 hide_index=True
             )
@@ -788,9 +737,11 @@ def render_tenant_history_report(service: PaymentService):
         st.error(f"❌ 載入失敗: {str(e)}")
         logger.error(f"房客歷史報表錯誤: {str(e)}", exc_info=True)
 
-def render_annual_report(service: PaymentService):
+
+def render_annual_report(payment_service: PaymentService):
     """年度統計報表"""
     st.info("🚧 年度統計報表開發中...")
+
 
 # ============================================
 # 本機測試入口
