@@ -1,8 +1,9 @@
 """
-通知管理頁面 - v2.0
+通知管理頁面 - v3.0 (Service 架構重構)
 ✅ 支援租金 + 電費通知查看
 ✅ 類別篩選功能
 ✅ 統計卡片優化
+✅ 使用 Service 架構
 """
 import streamlit as st
 import pandas as pd
@@ -10,6 +11,9 @@ from datetime import datetime
 import requests
 import logging
 
+# ✅ 使用 Service 架構
+from services.notification_service import NotificationService
+from services.payment_service import PaymentService
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +21,7 @@ logger = logging.getLogger(__name__)
 # ============== Tab 1: 系統設定 ==============
 
 
-def render_settings_tab(db):
+def render_settings_tab(notify_service: NotificationService):
     """系統設定頁面"""
     st.subheader("⚙️ 系統設定")
     
@@ -25,7 +29,7 @@ def render_settings_tab(db):
     st.divider()
     
     # 取得當前設定
-    current_settings = get_all_settings(db)
+    current_settings = notify_service.get_all_settings()
     
     # === LINE 設定 ===
     with st.expander("📱 LINE 通知設定", expanded=True):
@@ -56,12 +60,13 @@ def render_settings_tab(db):
             st.write("")
             if st.button("💾 儲存設定", use_container_width=True):
                 try:
-                    save_setting(db, "line_channel_access_token", line_token)
-                    save_setting(db, "landlord_line_user_id", line_user_id)
+                    notify_service.save_setting("line_channel_access_token", line_token)
+                    notify_service.save_setting("landlord_line_user_id", line_user_id)
                     st.success("✅ LINE 設定已儲存")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"儲存失敗: {e}")
+                    st.error(f"❌ 儲存失敗: {e}")
+                    logger.exception("儲存 LINE 設定失敗")
         
         st.divider()
         if st.button("📤 發送測試訊息", disabled=not (line_token and line_user_id)):
@@ -94,11 +99,12 @@ def render_settings_tab(db):
         
         if st.button("💾 儲存時間設定"):
             try:
-                save_setting(db, "notification_time_morning", morning_time.strftime("%H:%M"))
-                save_setting(db, "notification_time_evening", evening_time.strftime("%H:%M"))
+                notify_service.save_setting("notification_time_morning", morning_time.strftime("%H:%M"))
+                notify_service.save_setting("notification_time_evening", evening_time.strftime("%H:%M"))
                 st.success("✅ 通知時間已儲存")
             except Exception as e:
-                st.error(f"儲存失敗: {e}")
+                st.error(f"❌ 儲存失敗: {e}")
+                logger.exception("儲存通知時間失敗")
     
     # === 提前提醒天數 ===
     with st.expander("📅 提前提醒設定", expanded=False):
@@ -112,10 +118,11 @@ def render_settings_tab(db):
         
         if st.button("💾 儲存提醒設定"):
             try:
-                save_setting(db, "reminder_days_before", str(reminder_days))
+                notify_service.save_setting("reminder_days_before", str(reminder_days))
                 st.success("✅ 提醒設定已儲存")
             except Exception as e:
-                st.error(f"儲存失敗: {e}")
+                st.error(f"❌ 儲存失敗: {e}")
+                logger.exception("儲存提醒設定失敗")
     
     # === 啟用/停用通知 ===
     st.divider()
@@ -131,10 +138,11 @@ def render_settings_tab(db):
         
         if st.button("💾 儲存", key="save_enabled"):
             try:
-                save_setting(db, "enable_tenant_notification", "true" if notification_enabled else "false")
+                notify_service.save_setting("enable_tenant_notification", "true" if notification_enabled else "false")
                 st.success("✅ 設定已更新")
             except Exception as e:
-                st.error(f"儲存失敗: {e}")
+                st.error(f"❌ 儲存失敗: {e}")
+                logger.exception("儲存啟用狀態失敗")
     
     with col_info:
         if notification_enabled:
@@ -146,7 +154,7 @@ def render_settings_tab(db):
 # ============== Tab 2: 手動觸發 ==============
 
 
-def render_manual_tab(db):
+def render_manual_tab(notify_service: NotificationService, payment_service: PaymentService):
     """手動觸發通知"""
     st.subheader("🚀 手動觸發通知")
     
@@ -154,7 +162,7 @@ def render_manual_tab(db):
     st.divider()
     
     # 檢查設定
-    settings = get_all_settings(db)
+    settings = notify_service.get_all_settings()
     has_line = settings.get("landlord_line_user_id") and settings.get("line_channel_access_token")
     
     if not has_line:
@@ -165,34 +173,19 @@ def render_manual_tab(db):
     st.subheader("📋 當前待通知項目（租金）")
     
     try:
-        with db.get_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT 
-                    room_number,
-                    tenant_name,
-                    payment_year,
-                    payment_month,
-                    amount,
-                    due_date,
-                    notification_type,
-                    days_until_due
-                FROM vw_payments_need_notification
-                ORDER BY due_date
-            """)
-            
-            columns = [desc[0] for desc in cur.description]
-            data = cur.fetchall()
-            df = pd.DataFrame(data, columns=columns)
+        # ✅ 使用 PaymentService 查詢待通知項目
+        pending_notifications = payment_service.get_pending_notifications()
         
-        if df.empty:
+        if not pending_notifications:
             st.info("🎉 目前沒有需要通知的租金項目")
         else:
+            df = pd.DataFrame(pending_notifications)
+            
             col1, col2, col3 = st.columns(3)
             
-            reminder_count = len(df[df['notification_type'] == 'reminder'])
-            due_count = len(df[df['notification_type'] == 'due'])
-            overdue_count = len(df[df['notification_type'] == 'overdue'])
+            reminder_count = len(df[df['notification_type'] == 'reminder']) if 'notification_type' in df.columns else 0
+            due_count = len(df[df['notification_type'] == 'due']) if 'notification_type' in df.columns else 0
+            overdue_count = len(df[df['notification_type'] == 'overdue']) if 'notification_type' in df.columns else 0
             
             with col1:
                 st.metric("📅 提前提醒", f"{reminder_count} 筆")
@@ -205,7 +198,8 @@ def render_manual_tab(db):
             st.dataframe(df, use_container_width=True, hide_index=True)
     
     except Exception as e:
-        st.error(f"查詢失敗: {e}")
+        st.error(f"❌ 查詢失敗: {e}")
+        logger.exception("查詢待通知項目失敗")
     
     st.divider()
     
@@ -217,10 +211,12 @@ def render_manual_tab(db):
     with col1:
         if st.button("💰 觸發租金通知", type="primary", use_container_width=True):
             st.info("💡 請到 Supabase Dashboard → Edge Functions → daily-payment-check → Invoke 手動觸發")
+            st.caption("或使用 supabase functions invoke daily-payment-check 命令")
     
     with col2:
         if st.button("⚡ 觸發電費通知", type="primary", use_container_width=True):
             st.info("💡 請到 Supabase Dashboard → Edge Functions → send-electricity-bill → Invoke 手動觸發")
+            st.caption("或使用 supabase functions invoke send-electricity-bill 命令")
     
     st.divider()
     
@@ -228,29 +224,33 @@ def render_manual_tab(db):
     st.subheader("📜 最近觸發記錄")
     
     try:
-        recent_logs = get_recent_notifications(db, limit=10)
+        recent_logs = notify_service.get_recent_notifications(limit=10)
         
-        if not recent_logs.empty:
-            display_df = recent_logs.copy()
-            display_df["created_at"] = pd.to_datetime(display_df["created_at"]).dt.strftime("%Y-%m-%d %H:%M")
-            display_df["status"] = display_df["status"].apply(
+        if not recent_logs:
+            st.info("📭 尚無記錄")
+        else:
+            df = pd.DataFrame(recent_logs)
+            
+            # 格式化顯示
+            df["created_at"] = pd.to_datetime(df["created_at"]).dt.strftime("%Y-%m-%d %H:%M")
+            df["status"] = df["status"].apply(
                 lambda x: "✅ 已發送" if x == "sent" else "❌ 失敗" if x == "failed" else "⏳ 待發送"
             )
-            display_df["category"] = display_df["category"].apply(
+            df["category"] = df["category"].apply(
                 lambda x: "💰 租金" if x == "rent" else "⚡ 電費" if x == "electricity" else "📢 系統"
             )
-            st.dataframe(display_df, use_container_width=True, hide_index=True)
-        else:
-            st.info("📭 尚無記錄")
+            
+            st.dataframe(df, use_container_width=True, hide_index=True)
     
     except Exception as e:
-        st.error(f"載入失敗: {e}")
+        st.error(f"❌ 載入失敗: {e}")
+        logger.exception("載入最近記錄失敗")
 
 
 # ============== Tab 3: 通知記錄 ==============
 
 
-def render_logs_tab(db):
+def render_logs_tab(notify_service: NotificationService):
     """通知記錄查看"""
     st.subheader("📜 通知記錄")
     
@@ -291,11 +291,19 @@ def render_logs_tab(db):
     
     # 查詢記錄
     try:
-        df = get_notification_logs(db, days_back, filter_type, filter_status, filter_category, limit)
+        logs = notify_service.get_notification_logs(
+            days=days_back,
+            recipient_type=filter_type,
+            status=filter_status,
+            category=filter_category,
+            limit=limit
+        )
         
-        if df.empty:
+        if not logs:
             st.info("📭 查無記錄")
             return
+        
+        df = pd.DataFrame(logs)
         
         # 統計卡片
         cols1, cols2, cols3, cols4, cols5 = st.columns(5)
@@ -304,19 +312,19 @@ def render_logs_tab(db):
             st.metric("📊 總記錄數", str(len(df)))
         
         with cols2:
-            success_count = len(df[df["status"] == "sent"])
+            success_count = len(df[df["status"] == "sent"]) if "status" in df.columns else 0
             st.metric("✅ 已發送", str(success_count))
         
         with cols3:
-            failed_count = len(df[df["status"] == "failed"])
+            failed_count = len(df[df["status"] == "failed"]) if "status" in df.columns else 0
             st.metric("❌ 失敗", str(failed_count))
         
         with cols4:
-            rent_count = len(df[df["category"] == "rent"])
+            rent_count = len(df[df["category"] == "rent"]) if "category" in df.columns else 0
             st.metric("💰 租金", str(rent_count))
         
         with cols5:
-            elec_count = len(df[df["category"] == "electricity"])
+            elec_count = len(df[df["category"] == "electricity"]) if "category" in df.columns else 0
             st.metric("⚡ 電費", str(elec_count))
         
         st.divider()
@@ -332,16 +340,25 @@ def render_logs_tab(db):
         st.write(f"**共 {len(df)} 筆記錄**")
         
         display_df = df.copy()
-        display_df["created_at"] = pd.to_datetime(display_df["created_at"]).dt.strftime("%Y-%m-%d %H:%M")
-        display_df["status"] = display_df["status"].apply(
-            lambda x: "✅ 已發送" if x == "sent" else "❌ 失敗" if x == "failed" else "⏳ 待發送"
-        )
-        display_df["category"] = display_df["category"].apply(
-            lambda x: "💰 租金" if x == "rent" else "⚡ 電費" if x == "electricity" else "📢 系統" if x == "system" else "❓ 未知"
-        )
-        display_df["recipient_type"] = display_df["recipient_type"].apply(
-            lambda x: "🏠 房東" if x == "landlord" else "👤 房客" if x == "tenant" else "❓ 未知"
-        )
+        
+        # 格式化顯示
+        if "created_at" in display_df.columns:
+            display_df["created_at"] = pd.to_datetime(display_df["created_at"]).dt.strftime("%Y-%m-%d %H:%M")
+        
+        if "status" in display_df.columns:
+            display_df["status"] = display_df["status"].apply(
+                lambda x: "✅ 已發送" if x == "sent" else "❌ 失敗" if x == "failed" else "⏳ 待發送"
+            )
+        
+        if "category" in display_df.columns:
+            display_df["category"] = display_df["category"].apply(
+                lambda x: "💰 租金" if x == "rent" else "⚡ 電費" if x == "electricity" else "📢 系統" if x == "system" else "❓ 未知"
+            )
+        
+        if "recipient_type" in display_df.columns:
+            display_df["recipient_type"] = display_df["recipient_type"].apply(
+                lambda x: "🏠 房東" if x == "landlord" else "👤 房客" if x == "tenant" else "❓ 未知"
+            )
         
         # 重新排序欄位，讓類別在前面
         column_order = ["created_at", "category", "recipient_type", "room_number", "title", "status"]
@@ -355,21 +372,21 @@ def render_logs_tab(db):
         
         # 失敗記錄詳情
         st.divider()
-        failed_df = df[df["status"] == "failed"]
+        failed_df = df[df["status"] == "failed"] if "status" in df.columns else pd.DataFrame()
         
         if not failed_df.empty:
             st.write(f"**❌ 失敗記錄詳情（{len(failed_df)} 筆）**")
             
             for idx, row in failed_df.iterrows():
                 category_emoji = "💰" if row.get('category') == 'rent' else "⚡" if row.get('category') == 'electricity' else "📢"
-                with st.expander(f"{category_emoji} ID: {row['id']} - {row.get('title', row['notification_type'])}"):
+                with st.expander(f"{category_emoji} ID: {row['id']} - {row.get('title', row.get('notification_type', 'N/A'))}"):
                     col_a, col_b = st.columns(2)
                     with col_a:
-                        st.write(f"**接收者：** {row['recipient_type']}")
+                        st.write(f"**接收者：** {row.get('recipient_type', 'N/A')}")
                         st.write(f"**房號：** {row.get('room_number', 'N/A')}")
                     with col_b:
                         st.write(f"**類別：** {row.get('category', 'N/A')}")
-                        st.write(f"**時間：** {row['created_at']}")
+                        st.write(f"**時間：** {row.get('created_at', 'N/A')}")
                     
                     if row.get('error_message'):
                         st.error(f"**錯誤訊息：** {row['error_message']}")
@@ -379,43 +396,11 @@ def render_logs_tab(db):
                             st.text(row['message'])
     
     except Exception as e:
-        st.error(f"查詢失敗: {e}")
+        st.error(f"❌ 查詢失敗: {e}")
         logger.exception("查詢通知記錄時發生錯誤")
 
 
 # ============== 輔助函數 ==============
-
-
-def get_all_settings(db) -> dict:
-    """取得所有系統設定"""
-    try:
-        with db.get_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT setting_key, setting_value FROM notification_settings")
-            settings = {}
-            for row in cur.fetchall():
-                settings[row[0]] = row[1]
-            return settings
-    except Exception as e:
-        logger.error(f"取得設定失敗: {e}")
-        return {}
-
-
-def save_setting(db, key: str, value: str):
-    """儲存單一設定"""
-    try:
-        with db.get_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO notification_settings (setting_key, setting_value, updated_at)
-                VALUES (%s, %s, NOW())
-                ON CONFLICT (setting_key) 
-                DO UPDATE SET setting_value = EXCLUDED.setting_value, updated_at = NOW()
-            """, (key, value))
-            conn.commit()
-    except Exception as e:
-        logger.error(f"儲存設定失敗: {e}")
-        raise
 
 
 def send_test_line_message(access_token: str, user_id: str) -> tuple:
@@ -448,112 +433,38 @@ def send_test_line_message(access_token: str, user_id: str) -> tuple:
             return False, f"❌ 發送失敗 (HTTP {response.status_code}): {response.text}"
     
     except Exception as e:
+        logger.error(f"發送測試訊息失敗: {e}")
         return False, f"❌ 發送失敗: {str(e)}"
-
-
-def get_recent_notifications(db, limit: int = 10) -> pd.DataFrame:
-    """取得最近的通知記錄"""
-    try:
-        with db.get_connection() as conn:
-            cur = conn.cursor()
-            query = """
-                SELECT 
-                    id,
-                    category,
-                    recipient_type,
-                    notification_type,
-                    status,
-                    created_at
-                FROM notification_logs
-                ORDER BY created_at DESC
-                LIMIT %s
-            """
-            cur.execute(query, (limit,))
-            
-            columns = [desc[0] for desc in cur.description]
-            data = cur.fetchall()
-            
-            return pd.DataFrame(data, columns=columns)
-    except Exception as e:
-        logger.error(f"查詢最近通知失敗: {e}")
-        return pd.DataFrame()
-
-
-def get_notification_logs(
-    db, 
-    days: int, 
-    recipient_type: str = None, 
-    status: str = None, 
-    category: str = None,
-    limit: int = 100
-) -> pd.DataFrame:
-    """查詢通知記錄"""
-    try:
-        with db.get_connection() as conn:
-            cur = conn.cursor()
-            
-            conditions = ["created_at > NOW() - INTERVAL '%s days'"]
-            params = [days]
-            
-            if recipient_type:
-                conditions.append("recipient_type = %s")
-                params.append(recipient_type)
-            
-            if status:
-                conditions.append("status = %s")
-                params.append(status)
-            
-            if category:
-                conditions.append("category = %s")
-                params.append(category)
-            
-            where_clause = " AND ".join(conditions)
-            params.append(limit)
-            
-            query = f"""
-                SELECT 
-                    id,
-                    category,
-                    recipient_type,
-                    recipient_id,
-                    room_number,
-                    notification_type,
-                    title,
-                    message,
-                    status,
-                    error_message,
-                    created_at
-                FROM notification_logs
-                WHERE {where_clause}
-                ORDER BY created_at DESC
-                LIMIT %s
-            """
-            
-            cur.execute(query, tuple(params))
-            
-            columns = [desc[0] for desc in cur.description]
-            data = cur.fetchall()
-            
-            return pd.DataFrame(data, columns=columns)
-    except Exception as e:
-        logger.error(f"查詢通知記錄失敗: {e}")
-        return pd.DataFrame()
 
 
 # ============== 主函數 ==============
 
 
-def render(db):
-    """通知管理主頁面（供 main.py 呼叫）"""
+def render():
+    """通知管理主頁面"""
     st.title("📬 通知管理")
+    
+    # ✅ 初始化 Services
+    notify_service = NotificationService()
+    payment_service = PaymentService()
     
     tab1, tab2, tab3 = st.tabs(["⚙️ 系統設定", "🚀 手動觸發", "📜 通知記錄"])
     
     with tab1:
-        render_settings_tab(db)
+        render_settings_tab(notify_service)
     
     with tab2:
-        render_manual_tab(db)
+        render_manual_tab(notify_service, payment_service)
     
     with tab3:
-        render_logs_tab(db)
+        render_logs_tab(notify_service)
+
+
+# ✅ 主入口
+def show():
+    """Streamlit 頁面入口"""
+    render()
+
+
+if __name__ == "__main__":
+    show()
