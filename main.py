@@ -4,6 +4,7 @@ Nordic Edition v3.0 (Service Architecture)
 ✅ 完全移除 db 依賴
 ✅ 使用 Service 架構
 ✅ 動態載入頁面模組
+✅ 修正模組名稱映射
 """
 
 import os
@@ -61,7 +62,7 @@ if missing_vars:
 # 讀取全域配置（允許從 env / secrets 覆蓋預設值）
 APP_CONFIG = {
     "title": get_env("APP_TITLE", "幸福之家 Pro"),
-    "version": get_env("APP_VERSION", "v3.0"),
+    "version": get_env("APP_VERSION", "v14.3"),
     "environment": get_env("ENVIRONMENT", "production"),
     "log_level": get_env("LOG_LEVEL", "INFO"),
 }
@@ -216,11 +217,11 @@ def main() -> None:
 
     # ============ 動態載入 Views (無 db 參數) ============
     
-    # ✅ 頁面模組映射
+    # ✅ 修正：頁面模組映射（對應實際檔案名稱）
     PAGE_MODULES = {
         "📊 儀表板": "dashboard",
-        "👥 房客管理": "tenant_management",
-        "💰 租金管理": "rent_management",
+        "👥 房客管理": "tenants",        # ✅ 修正為 tenants
+        "💰 租金管理": "rent",           # ✅ 修正為 rent
         "📋 繳費追蹤": "tracking",
         "⚡ 電費管理": "electricity",
         "💸 支出記錄": "expenses",
