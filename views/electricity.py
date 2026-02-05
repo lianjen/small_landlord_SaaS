@@ -1,22 +1,27 @@
 """
-電費管理 - v3.1 完整版 (手動+自動雙模式)
+電費管理 - v4.0 完整版 (Service 架構重構)
 
-✅ v3.0 功能：
+✅ v3.1 功能：
+  - 三種通知模式：不發送 | 手動發送 | 自動發送
   - 電費帳單通知功能
   - 催繳日期設定
 
-✅ v3.1 新增：
-  - 三種通知模式：不發送 | 手動發送 | 自動發送
-  - 靈活控制首次通知發送時機
-  - 儲存後可選擇是否立即通知
+✅ v4.0 重構：
+  - 使用 Service 架構替代直接 DB 操作
+  - 完整的錯誤處理
+  - 更好的日誌記錄
 """
 
 import streamlit as st
 import pandas as pd
-from datetime import date
-from typing import Dict, List
+from datetime import date, datetime, timedelta
+from typing import Dict, List, Optional
 import logging
-import requests
+
+# ✅ 使用 Service 架構
+from services.electricity_service import ElectricityService
+from services.notification_service import NotificationService
+from services.tenant_service import TenantService
 
 # 安全 import components
 try:
@@ -27,8 +32,8 @@ except ImportError:
         if divider:
             st.divider()
     
-    def metric_card(label, value, icon="", color="normal"):
-        st.metric(label, value)
+    def metric_card(label, value, delta="", icon="", color="normal"):
+        st.metric(label, value, delta)
     
     def empty_state(msg, icon="", desc=""):
         st.info(f"{icon} {msg}")
@@ -84,7 +89,7 @@ def calculate_electricity_charges(
     room_readings: Dict[str, float]
 ) -> Dict:
     """
-    計算電費 - v3.1
+    計算電費 - v4.0
     
     Args:
         taipower_bills: [{'floor_label': '1F', 'amount': 1000, 'kwh': 100}, ...]
@@ -93,154 +98,162 @@ def calculate_electricity_charges(
     Returns:
         計費結果字典
     """
-    # === Step 1: 分離 1F 和 2F~4F ===
-    floor_1f = None
-    floors_2f_4f = []
-    
-    for bill in taipower_bills:
-        if bill['floor_label'] == '1F':
-            floor_1f = bill
-        else:
-            floors_2f_4f.append(bill)
-    
-    # === Step 2: 計算 2F~4F 合併數據 ===
-    if floors_2f_4f:
-        merged_amount = sum(bill['amount'] for bill in floors_2f_4f)
-        merged_kwh = sum(bill['kwh'] for bill in floors_2f_4f)
-        merged_unit_price = round(merged_amount / merged_kwh, 2) if merged_kwh > 0 else 0
-    else:
-        merged_amount = 0
-        merged_kwh = 0
-        merged_unit_price = 0
-    
-    # === Step 3: 計算 2A~4D 私用電與公用電 ===
-    sharing_rooms_usage = sum(
-        room_readings.get(room, 0)
-        for room in ROOMS.SHARING_ROOMS
-    )
-    
-    public_kwh = max(0, merged_kwh - sharing_rooms_usage)
-    
-    # === Step 4: 計算分攤（10間）===
-    sharing_rooms_with_reading = [
-        room for room in ROOMS.SHARING_ROOMS
-        if room_readings.get(room, 0) > 0
-    ]
-    
-    sharing_count = len(sharing_rooms_with_reading)
-    shared_per_room = int(round(public_kwh / sharing_count)) if sharing_count > 0 else 0
-    
-    # === Step 5: 處理結果 ===
-    results = []
-    
-    # --- 處理 1F (1A/1B) 完全獨立 ---
-    if floor_1f and floor_1f['kwh'] > 0:
-        floor_1f_unit_price = round(floor_1f['amount'] / floor_1f['kwh'], 2)
+    try:
+        # === Step 1: 分離 1F 和 2F~4F ===
+        floor_1f = None
+        floors_2f_4f = []
         
-        for room in ROOMS.EXCLUSIVE_ROOMS:
+        for bill in taipower_bills:
+            if bill['floor_label'] == '1F':
+                floor_1f = bill
+            else:
+                floors_2f_4f.append(bill)
+        
+        # === Step 2: 計算 2F~4F 合併數據 ===
+        if floors_2f_4f:
+            merged_amount = sum(bill['amount'] for bill in floors_2f_4f)
+            merged_kwh = sum(bill['kwh'] for bill in floors_2f_4f)
+            merged_unit_price = round(merged_amount / merged_kwh, 2) if merged_kwh > 0 else 0
+        else:
+            merged_amount = 0
+            merged_kwh = 0
+            merged_unit_price = 0
+        
+        # === Step 3: 計算 2A~4D 私用電與公用電 ===
+        sharing_rooms_usage = sum(
+            room_readings.get(room, 0)
+            for room in ROOMS.SHARING_ROOMS
+        )
+        
+        public_kwh = max(0, merged_kwh - sharing_rooms_usage)
+        
+        # === Step 4: 計算分攤（10間）===
+        sharing_rooms_with_reading = [
+            room for room in ROOMS.SHARING_ROOMS
+            if room_readings.get(room, 0) > 0
+        ]
+        
+        sharing_count = len(sharing_rooms_with_reading)
+        shared_per_room = int(round(public_kwh / sharing_count)) if sharing_count > 0 else 0
+        
+        # === Step 5: 處理結果 ===
+        results = []
+        
+        # --- 處理 1F (1A/1B) 完全獨立 ---
+        if floor_1f and floor_1f['kwh'] > 0:
+            floor_1f_unit_price = round(floor_1f['amount'] / floor_1f['kwh'], 2)
+            
+            for room in ROOMS.EXCLUSIVE_ROOMS:
+                kwh = room_readings.get(room, 0)
+                if kwh <= 0:
+                    continue
+                
+                charge = round(kwh * floor_1f_unit_price)
+                
+                results.append({
+                    '樓層': '1F',
+                    '房號': room,
+                    '類型': '獨立房間',
+                    '使用度數': round(kwh, 2),
+                    '公用分攤': 0,
+                    '總度數': round(kwh, 2),
+                    '單價': floor_1f_unit_price,
+                    '應繳金額': charge
+                })
+        
+        # --- 處理 2F~4F (2A~4D) 分攤房間 ---
+        for room in ROOMS.SHARING_ROOMS:
             kwh = room_readings.get(room, 0)
             if kwh <= 0:
                 continue
             
-            charge = round(kwh * floor_1f_unit_price)
+            # 判斷樓層
+            if room in ['2A', '2B']:
+                floor = '2F'
+            elif room in ['3A', '3B', '3C', '3D']:
+                floor = '3F'
+            elif room in ['4A', '4B', '4C', '4D']:
+                floor = '4F'
+            else:
+                floor = None
+            
+            shared_kwh = shared_per_room
+            total_room_kwh = kwh + shared_kwh
+            charge = round(total_room_kwh * merged_unit_price)
             
             results.append({
-                '樓層': '1F',
+                '樓層': floor,
                 '房號': room,
-                '類型': '獨立房間',
+                '類型': '分攤房間',
                 '使用度數': round(kwh, 2),
-                '公用分攤': 0,
-                '總度數': round(kwh, 2),
-                '單價': floor_1f_unit_price,
+                '公用分攤': int(shared_kwh),
+                '總度數': round(total_room_kwh, 2),
+                '單價': merged_unit_price,
                 '應繳金額': charge
             })
-    
-    # --- 處理 2F~4F (2A~4D) 分攤房間 ---
-    for room in ROOMS.SHARING_ROOMS:
-        kwh = room_readings.get(room, 0)
-        if kwh <= 0:
-            continue
         
-        # 判斷樓層
-        if room in ['2A', '2B']:
-            floor = '2F'
-        elif room in ['3A', '3B', '3C', '3D']:
-            floor = '3F'
-        elif room in ['4A', '4B', '4C', '4D']:
-            floor = '4F'
-        else:
-            floor = None
+        # === Step 6: 計算總計 ===
+        total_charge = sum(r['應繳金額'] for r in results)
+        total_taipower = sum(bill['amount'] for bill in taipower_bills)
         
-        shared_kwh = shared_per_room
-        total_room_kwh = kwh + shared_kwh
-        charge = round(total_room_kwh * merged_unit_price)
+        # === Step 7: 生成樓層摘要 ===
+        floor_summaries = []
         
-        results.append({
-            '樓層': floor,
-            '房號': room,
-            '類型': '分攤房間',
-            '使用度數': round(kwh, 2),
-            '公用分攤': int(shared_kwh),
-            '總度數': round(total_room_kwh, 2),
-            '單價': merged_unit_price,
-            '應繳金額': charge
-        })
-    
-    # === Step 6: 計算總計 ===
-    total_charge = sum(r['應繳金額'] for r in results)
-    total_taipower = sum(bill['amount'] for bill in taipower_bills)
-    
-    # === Step 7: 生成樓層摘要 ===
-    floor_summaries = []
-    
-    # 1F 摘要
-    if floor_1f:
-        floor_1f_results = [r for r in results if r['房號'] in ['1A', '1B']]
-        if floor_1f_results:
-            floor_summaries.append({
-                'floor': '1F',
-                'bill_amount': floor_1f['amount'],
-                'bill_kwh': floor_1f['kwh'],
-                'room_kwh': sum(r['使用度數'] for r in floor_1f_results),
-                'unit_price': round(floor_1f['amount'] / floor_1f['kwh'], 2),
-                'total_charge': sum(r['應繳金額'] for r in floor_1f_results)
-            })
-    
-    # 2F~4F 摘要
-    for bill in floors_2f_4f:
-        floor_label = bill['floor_label']
-        floor_rooms = FLOOR_CONFIG[floor_label]['rooms']
-        floor_results = [r for r in results if r['房號'] in floor_rooms]
+        # 1F 摘要
+        if floor_1f:
+            floor_1f_results = [r for r in results if r['房號'] in ['1A', '1B']]
+            if floor_1f_results:
+                floor_summaries.append({
+                    'floor': '1F',
+                    'bill_amount': floor_1f['amount'],
+                    'bill_kwh': floor_1f['kwh'],
+                    'room_kwh': sum(r['使用度數'] for r in floor_1f_results),
+                    'unit_price': round(floor_1f['amount'] / floor_1f['kwh'], 2),
+                    'total_charge': sum(r['應繳金額'] for r in floor_1f_results)
+                })
         
-        if floor_results:
-            floor_room_kwh = sum(r['使用度數'] for r in floor_results)
-            floor_total_charge = sum(r['應繳金額'] for r in floor_results)
+        # 2F~4F 摘要
+        for bill in floors_2f_4f:
+            floor_label = bill['floor_label']
+            floor_rooms = FLOOR_CONFIG[floor_label]['rooms']
+            floor_results = [r for r in results if r['房號'] in floor_rooms]
             
-            floor_summaries.append({
-                'floor': floor_label,
-                'bill_amount': bill['amount'],
-                'bill_kwh': bill['kwh'],
-                'room_kwh': floor_room_kwh,
-                'unit_price': merged_unit_price,
-                'total_charge': floor_total_charge
-            })
+            if floor_results:
+                floor_room_kwh = sum(r['使用度數'] for r in floor_results)
+                floor_total_charge = sum(r['應繳金額'] for r in floor_results)
+                
+                floor_summaries.append({
+                    'floor': floor_label,
+                    'bill_amount': bill['amount'],
+                    'bill_kwh': bill['kwh'],
+                    'room_kwh': floor_room_kwh,
+                    'unit_price': merged_unit_price,
+                    'total_charge': floor_total_charge
+                })
+        
+        logger.info(f"✅ 電費計算完成: {len(results)} 間房間")
+        
+        return {
+            'total_charge': total_charge,
+            'taipower_amount': total_taipower,
+            'difference': total_charge - total_taipower,
+            'details': results,
+            'floor_summaries': floor_summaries,
+            'merged_unit_price': merged_unit_price,
+            'total_public_kwh': public_kwh,
+            'shared_per_room': shared_per_room,
+            'merged_kwh': merged_kwh,
+            'merged_amount': merged_amount
+        }
     
-    return {
-        'total_charge': total_charge,
-        'taipower_amount': total_taipower,
-        'difference': total_charge - total_taipower,
-        'details': results,
-        'floor_summaries': floor_summaries,
-        'merged_unit_price': merged_unit_price,
-        'total_public_kwh': public_kwh,
-        'shared_per_room': shared_per_room,
-        'merged_kwh': merged_kwh,
-        'merged_amount': merged_amount
-    }
+    except Exception as e:
+        logger.error(f"❌ 電費計算失敗: {e}")
+        st.error(f"❌ 計算失敗: {str(e)}")
+        return None
 
 
 # ============== Tab 1: 計費期間 ==============
-def render_period_tab(db):
+def render_period_tab(elec_service: ElectricityService):
     """計費期間管理"""
     section_header("計費期間管理", "📅")
     
@@ -279,7 +292,7 @@ def render_period_tab(db):
             if month_end <= month_start:
                 st.error("❌ 結束月必須大於開始月")
             else:
-                ok, msg, period_id = db.add_electricity_period(year, month_start, month_end)
+                ok, msg, period_id = elec_service.add_period(year, month_start, month_end)
                 if ok:
                     st.success(msg)
                     st.session_state.current_period_id = period_id
@@ -292,14 +305,14 @@ def render_period_tab(db):
     # 顯示期間列表
     section_header("現有期間", "📋", divider=False)
     
-    periods = db.get_all_periods()
+    periods = elec_service.get_all_periods()
     if not periods:
         empty_state("尚未建立期間", "📅", "請先建立一個計費期間")
         return
     
     # 選擇期間
     period_options = {
-        f"{p['period_year']}/{p['period_month_start']}-{p['period_month_end']} (ID: {p['id']})": p['id']
+        f"{p['period_year']}/{p['period_month_start']:02d}-{p['period_month_end']:02d} (ID: {p['id']})": p['id']
         for p in periods
     }
     
@@ -318,7 +331,7 @@ def render_period_tab(db):
         with col_del:
             if st.button("🗑️ 刪除期間", type="secondary"):
                 if st.session_state.get('confirm_delete_period'):
-                    ok, msg = db.delete_electricity_period(period_id)
+                    ok, msg = elec_service.delete_period(period_id)
                     if ok:
                         st.success(msg)
                         if 'current_period_id' in st.session_state:
@@ -336,7 +349,7 @@ def render_period_tab(db):
 
 
 # ============== Tab 2: 計算電費 ==============
-def render_calculation_tab(db):
+def render_calculation_tab(elec_service: ElectricityService, notify_service: NotificationService):
     """計算電費"""
     if 'current_period_id' not in st.session_state:
         info_card("請先選擇期間", "請前往「計費期間」Tab 選擇一個期間", "⚠️", "warning")
@@ -346,7 +359,7 @@ def render_calculation_tab(db):
     st.info(f"📅 當前期間 ID: {period_id}")
     
     # 檢查是否已有儲存記錄
-    existing_records = db.get_electricity_payment_record(period_id)
+    existing_records = elec_service.get_payment_record(period_id)
     if existing_records is not None and not existing_records.empty:
         st.success(f"✅ 此期間已有 {len(existing_records)} 筆儲存記錄，可前往「📜 繳費記錄」Tab 查看")
     
@@ -488,7 +501,7 @@ def render_calculation_tab(db):
                 st.markdown(f"**{room}**")
                 
                 # 取得上次讀數
-                last_reading = db.get_latest_meter_reading(room, period_id)
+                last_reading = elec_service.get_latest_meter_reading(room, period_id)
                 is_first_time = (last_reading is None or last_reading == 0)
                 
                 if is_first_time:
@@ -553,7 +566,7 @@ def render_calculation_tab(db):
         save_count = 0
         for room, usage in room_readings.items():
             raw = raw_readings[room]
-            ok, msg = db.save_electricity_reading(
+            ok, msg = elec_service.save_reading(
                 period_id, room, raw['previous'], raw['current'], usage
             )
             if ok:
@@ -594,17 +607,6 @@ def render_calculation_tab(db):
             room = detail['房號']
             detail['previous_reading'] = raw[room]['previous']
             detail['current_reading'] = raw[room]['current']
-            
-            # 添加簡體中文欄位別名（相容 db.py）
-            detail['房号'] = detail.get('房號', '')
-            detail['楼层'] = detail.get('樓層', '')
-            detail['类型'] = detail.get('類型', '')
-            detail['使用度数'] = detail.get('使用度數', 0)
-            detail['公用分摊'] = detail.get('公用分攤', 0)
-            detail['总度数'] = detail.get('總度數', 0)
-            detail['单价'] = detail.get('單價', 0)
-            detail['应缴金额'] = detail.get('應繳金額', 0)
-            
             enriched_details.append(detail)
         
         # 儲存到 session_state
@@ -670,7 +672,7 @@ def render_calculation_tab(db):
                        '使用度數', '公用分攤', '總度數', '單價', '應繳金額']
         details_df = details_df[column_order]
         
-        # 格式化公用分攤為整數顯示
+        # 格式化
         details_df['公用分攤'] = details_df['公用分攤'].astype(int)
         
         details_df.columns = ['樓層', '房號', '類型', '上期讀數', '本期讀數',
@@ -678,7 +680,7 @@ def render_calculation_tab(db):
         
         data_table(details_df, key="calc_details")
         
-        # ===== ✨ v3.1 新增：手動+自動雙模式儲存 =====
+        # ===== ✨ v4.0 儲存 & 通知設定 =====
         st.divider()
         
         # 通知模式選擇
@@ -692,9 +694,9 @@ def render_calculation_tab(db):
                 options=["🚫 不發送", "🖱️ 手動發送", "⚡ 自動發送"],
                 horizontal=True,
                 help="""
-**🚫 不發送**: 只儲存計費記錄，不發送通知（適合測試）
-**🖱️ 手動發送**: 儲存後需要手動按按鈕發送首次通知（適合想控制發送時機）
-**⚡ 自動發送**: 儲存同時自動發送首次通知 + 設定催繳日期（推薦）
+**🚫 不發送**: 只儲存計費記錄，不發送通知
+**🖱️ 手動發送**: 儲存後手動按按鈕發送
+**⚡ 自動發送**: 儲存同時自動發送（推薦）
                 """,
                 key=f"notify_mode_{period_id}"
             )
@@ -724,7 +726,7 @@ def render_calculation_tab(db):
                     logger.info(f"Starting save for period {period_id}, {len(enriched_details)} records")
                     
                     # ✨ 步驟 1: 先保存計費記錄
-                    ok, msg = db.save_electricity_record(period_id, enriched_details)
+                    ok, msg = elec_service.save_records(period_id, enriched_details)
                     
                     if ok:
                         st.success("✅ " + msg)
@@ -733,7 +735,7 @@ def render_calculation_tab(db):
                         if notify_mode == "⚡ 自動發送":
                             with st.spinner("🚀 正在自動發送帳單通知..."):
                                 try:
-                                    auto_ok, auto_msg, notified_count = db.trigger_auto_first_notification(
+                                    auto_ok, auto_msg, notified_count = notify_service.send_electricity_bill_notification(
                                         period_id, 
                                         remind_date.isoformat()
                                     )
@@ -744,7 +746,6 @@ def render_calculation_tab(db):
 ✅ **自動首次通知已發送！**
 - 通知數量：{notified_count} 位租客
 - 催繳日期：{remind_date.strftime('%Y年%m月%d日')} 開始
-- 下月自動：系統每天中午 12:00 自動催繳
 
 💡 租客已收到 LINE 帳單通知，之後會自動催繳直到繳清。
                                         """)
@@ -758,39 +759,33 @@ def render_calculation_tab(db):
                         
                         elif notify_mode == "🖱️ 手動發送":
                             # 先更新催繳日期
-                            db.update_electricity_period_remind_date(period_id, remind_date.isoformat())
+                            elec_service.update_period_remind_date(period_id, remind_date.isoformat())
                             
                             st.info(f"""
 ℹ️ **通知模式：手動發送**
-- ✅ 計費記錄已保存到資料庫
-- ✅ 催繳日期已設定為: {remind_date.strftime('%Y年%m月%d日')}
-- 📨 請向下滾動，點擊「手動發送通知」按鈕發送首次帳單
-
-💡 發送後，系統會從催繳日期開始自動每天催繳。
+- ✅ 計費記錄已保存
+- ✅ 催繳日期已設定: {remind_date.strftime('%Y年%m月%d日')}
+- 📨 請向下滾動，點擊「手動發送通知」按鈕
                             """)
-                            # 設定標誌，顯示手動發送按鈕
+                            # 設定標誌
                             st.session_state[f'show_manual_send_{period_id}'] = True
                         
                         else:  # 不發送
-                            st.info(f"""
+                            st.info("""
 ℹ️ **通知模式：不發送**
-- ✅ 計費記錄已保存到資料庫
+- ✅ 計費記錄已保存
 - ⏸️ 暫不發送通知
-- 💾 資料已安全儲存，可稍後在「📜 繳費記錄」Tab 手動發送
-
-💡 適合測試或需要稍後再通知的情況。
                             """)
                         
                         logger.info(f"Successfully saved for period {period_id}, notify_mode: {notify_mode}")
                         
-                        # 清除計算結果（只有在非手動發送模式下才清除，因為手動發送還需要顯示按鈕）
+                        # 清除計算結果（手動發送模式除外）
                         if notify_mode != "🖱️ 手動發送":
                             if f'calc_result_{period_id}' in st.session_state:
                                 del st.session_state[f'calc_result_{period_id}']
                             if f'calc_details_{period_id}' in st.session_state:
                                 del st.session_state[f'calc_details_{period_id}']
                             
-                            # 稍微延遲後刷新
                             import time
                             time.sleep(1)
                             st.rerun()
@@ -811,57 +806,50 @@ def render_calculation_tab(db):
                 "text/csv"
             )
         
-        # ✨ 手動發送通知按鈕（當選擇手動發送且已儲存時顯示）
+        # ✨ 手動發送通知按鈕
         if notify_mode == "🖱️ 手動發送" and st.session_state.get(f'show_manual_send_{period_id}'):
             st.divider()
             
             st.markdown("### 📨 手動發送首次帳單通知")
-            st.caption(f"💡 點擊後將向所有租客發送 LINE 帳單通知，催繳日期: {remind_date.strftime('%Y年%m月%d日')}")
+            st.caption(f"💡 點擊後將向所有租客發送 LINE 帳單通知")
             
-            col_manual_btn, col_placeholder = st.columns([1, 3])
-            
-            with col_manual_btn:
-                if st.button("📨 發送通知", type="secondary", key=f"manual_send_{period_id}"):
-                    with st.spinner("正在發送帳單通知..."):
-                        try:
-                            ok, msg, notified_count = db.trigger_auto_first_notification(
-                                period_id, 
-                                remind_date.isoformat()
-                            )
-                            
-                            if ok:
-                                st.success(f"✅ {msg}")
-                                st.info(f"""
+            if st.button("📨 發送通知", type="secondary", key=f"manual_send_{period_id}"):
+                with st.spinner("正在發送帳單通知..."):
+                    try:
+                        ok, msg, notified_count = notify_service.send_electricity_bill_notification(
+                            period_id, 
+                            remind_date.isoformat()
+                        )
+                        
+                        if ok:
+                            st.success(f"✅ {msg}")
+                            st.info(f"""
 📨 **通知發送成功！**
 - 已向 {notified_count} 位租客發送 LINE 帳單
-- 催繳日期: {remind_date.strftime('%Y年%m月%d日')}
-- 系統將從該日期開始自動每天催繳
-
-💡 租客已收到首次帳單，後續會自動處理。
-                                """)
-                                st.balloons()
-                                
-                                # 清除標誌和計算結果
-                                if f'show_manual_send_{period_id}' in st.session_state:
-                                    del st.session_state[f'show_manual_send_{period_id}']
-                                if f'calc_result_{period_id}' in st.session_state:
-                                    del st.session_state[f'calc_result_{period_id}']
-                                if f'calc_details_{period_id}' in st.session_state:
-                                    del st.session_state[f'calc_details_{period_id}']
-                                
-                                import time
-                                time.sleep(2)
-                                st.rerun()
-                            else:
-                                st.error(f"❌ 發送失敗: {msg}")
-                        
-                        except Exception as e:
-                            st.error(f"❌ 發送出錯: {str(e)}")
-                            logger.exception(f"Manual notification error: {e}")
+                            """)
+                            st.balloons()
+                            
+                            # 清除標誌和計算結果
+                            if f'show_manual_send_{period_id}' in st.session_state:
+                                del st.session_state[f'show_manual_send_{period_id}']
+                            if f'calc_result_{period_id}' in st.session_state:
+                                del st.session_state[f'calc_result_{period_id}']
+                            if f'calc_details_{period_id}' in st.session_state:
+                                del st.session_state[f'calc_details_{period_id}']
+                            
+                            import time
+                            time.sleep(2)
+                            st.rerun()
+                        else:
+                            st.error(f"❌ 發送失敗: {msg}")
+                    
+                    except Exception as e:
+                        st.error(f"❌ 發送出錯: {str(e)}")
+                        logger.exception(f"Manual notification error: {e}")
 
 
 # ============== Tab 3: 繳費記錄 ==============
-def render_records_tab(db):
+def render_records_tab(elec_service: ElectricityService):
     """繳費記錄"""
     section_header("繳費記錄", "📜")
     
@@ -874,34 +862,34 @@ def render_records_tab(db):
     # 顯示當前期間資訊
     st.info(f"📅 當前查詢期間 ID: {period_id}")
     
-    # 加入 debug 資訊
+    # 查詢記錄
     with st.spinner("正在從資料庫查詢記錄..."):
-        df = db.get_electricity_payment_record(period_id)
+        df = elec_service.get_payment_record(period_id)
         logger.info(f"Query result for period {period_id}: {len(df) if df is not None else 0} records")
     
     if df is None or df.empty:
         empty_state(
             "尚無記錄",
             "📭",
-            f"請先在「計算電費」Tab 完成計算並按「💾 儲存計費結果到資料庫」\n\n當前期間 ID: {period_id}"
+            f"請先在「計算電費」Tab 完成計算並儲存"
         )
         return
     
     # 顯示記錄數量
     st.success(f"✅ 已找到 {len(df)} 筆計費記錄")
     
-    summary = db.get_electricity_payment_summary(period_id)
+    summary = elec_service.get_payment_summary(period_id)
     if summary:
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            metric_card("應收總額", f"${summary.get('total_due', 0):,}", "💰", "normal")
+            metric_card("應收總額", f"${summary.get('total_due', 0):,}", "", "💰", "normal")
         
         with col2:
-            metric_card("已收金額", f"${summary.get('total_paid', 0):,}", "✅", "success")
+            metric_card("已收金額", f"${summary.get('total_paid', 0):,}", "", "✅", "success")
         
         with col3:
-            metric_card("未收金額", f"${summary.get('total_balance', 0):,}", "⚠️", "warning")
+            metric_card("未收金額", f"${summary.get('total_balance', 0):,}", "", "⚠️", "warning")
     
     st.divider()
     
@@ -921,12 +909,12 @@ def render_records_tab(db):
             with col_info:
                 # 提取金額數字
                 amount_str = str(row.get('應繳金額', '0'))
-                amount = int(amount_str.replace('$', '').replace(',', ''))
+                amount = int(amount_str.replace('$', '').replace(',', '')) if amount_str else 0
                 st.write(f"**{row['房號']}** | ${amount:,} 元")
             
             with col_btn:
                 if st.button("✅", key=f"pay_{idx}"):
-                    ok, msg = db.update_electricity_payment(
+                    ok, msg = elec_service.update_payment(
                         period_id,
                         row['房號'],
                         'paid',
@@ -943,17 +931,31 @@ def render_records_tab(db):
 
 
 # ============== 主函數 ==============
-def render(db):
+def render():
     """主渲染函數"""
     st.title("⚡ 電費管理")
+    
+    # ✅ 初始化 Services
+    elec_service = ElectricityService()
+    notify_service = NotificationService()
     
     tab1, tab2, tab3 = st.tabs(["📅 計費期間", "🧮 計算電費", "📜 繳費記錄"])
     
     with tab1:
-        render_period_tab(db)
+        render_period_tab(elec_service)
     
     with tab2:
-        render_calculation_tab(db)
+        render_calculation_tab(elec_service, notify_service)
     
     with tab3:
-        render_records_tab(db)
+        render_records_tab(elec_service)
+
+
+# ✅ 主入口
+def show():
+    """Streamlit 頁面入口"""
+    render()
+
+
+if __name__ == "__main__":
+    show()
