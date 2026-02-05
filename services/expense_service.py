@@ -8,7 +8,7 @@
 import pandas as pd
 from datetime import date
 from typing import Tuple, Dict, List, Optional
-from services.basedb import BaseDBService
+from services.base_db import BaseDBService  # ✅ 修正：base_db (有底線)
 from services.logger import logger, log_db_operation
 
 try:
