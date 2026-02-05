@@ -1,9 +1,10 @@
 """
-統一通知服務 - v4.0 Final
+統一通知服務 - v4.1
 ✅ 整合 LINE/Email 發送
 ✅ 自動寫入 notification_logs
 ✅ 支援電費、租金、催繳等多種通知類型
 ✅ 完整的錯誤追蹤
+✅ 系統設定管理 (新增)
 """
 
 import os
@@ -11,7 +12,7 @@ import json
 import requests
 import streamlit as st
 from typing import Optional, Dict, Tuple, List
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from services.base_db import BaseDBService
 from services.logger import logger, log_db_operation
@@ -29,6 +30,247 @@ class NotificationService(BaseDBService):
         
         if not self.line_token:
             logger.warning("⚠️ 未設定 LINE_CHANNEL_ACCESS_TOKEN，LINE 通知功能將無法使用")
+    
+    # ============= 系統設定管理 (新增) =============
+    
+    def get_all_settings(self) -> Dict[str, str]:
+        """
+        獲取所有系統設定
+        
+        Returns:
+            Dict: {key: value} 設定字典
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    SELECT setting_key, setting_value
+                    FROM system_settings
+                    WHERE is_active = true
+                """)
+                
+                rows = cursor.fetchall()
+                
+                settings = {row[0]: row[1] for row in rows}
+                
+                log_db_operation("SELECT", "system_settings", True, len(settings))
+                logger.info(f"✅ 載入系統設定: {len(settings)} 筆")
+                
+                return settings
+        
+        except Exception as e:
+            log_db_operation("SELECT", "system_settings", False, error=str(e))
+            logger.error(f"❌ 載入系統設定失敗: {str(e)}")
+            return {}
+    
+    def get_setting(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """
+        獲取單個系統設定
+        
+        Args:
+            key: 設定鍵名
+            default: 預設值
+        
+        Returns:
+            設定值或預設值
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    SELECT setting_value
+                    FROM system_settings
+                    WHERE setting_key = %s AND is_active = true
+                """, (key,))
+                
+                result = cursor.fetchone()
+                
+                if result:
+                    log_db_operation("SELECT", "system_settings", True, 1)
+                    return result[0]
+                else:
+                    logger.info(f"⚠️ 設定 {key} 不存在，使用預設值: {default}")
+                    return default
+        
+        except Exception as e:
+            log_db_operation("SELECT", "system_settings", False, error=str(e))
+            logger.error(f"❌ 讀取設定失敗 ({key}): {str(e)}")
+            return default
+    
+    def save_setting(self, key: str, value: str) -> Tuple[bool, str]:
+        """
+        儲存或更新系統設定
+        
+        Args:
+            key: 設定鍵名
+            value: 設定值
+        
+        Returns:
+            (bool, str): 成功/失敗訊息
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # 使用 UPSERT (ON CONFLICT)
+                cursor.execute("""
+                    INSERT INTO system_settings 
+                    (setting_key, setting_value, updated_at)
+                    VALUES (%s, %s, NOW())
+                    ON CONFLICT (setting_key)
+                    DO UPDATE SET 
+                        setting_value = EXCLUDED.setting_value,
+                        updated_at = NOW()
+                """, (key, value))
+                
+                log_db_operation("UPSERT", "system_settings", True, 1)
+                logger.info(f"✅ 儲存設定: {key} = {value[:50]}...")
+                
+                return True, f"✅ 設定 {key} 已儲存"
+        
+        except Exception as e:
+            log_db_operation("UPSERT", "system_settings", False, error=str(e))
+            logger.error(f"❌ 儲存設定失敗 ({key}): {str(e)}")
+            return False, f"❌ 儲存失敗: {str(e)[:100]}"
+    
+    def delete_setting(self, key: str) -> Tuple[bool, str]:
+        """
+        刪除系統設定（軟刪除）
+        
+        Args:
+            key: 設定鍵名
+        
+        Returns:
+            (bool, str): 成功/失敗訊息
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    UPDATE system_settings
+                    SET is_active = false, updated_at = NOW()
+                    WHERE setting_key = %s
+                """, (key,))
+                
+                log_db_operation("UPDATE", "system_settings", True, 1)
+                logger.info(f"✅ 刪除設定: {key}")
+                
+                return True, f"✅ 設定 {key} 已刪除"
+        
+        except Exception as e:
+            log_db_operation("UPDATE", "system_settings", False, error=str(e))
+            logger.error(f"❌ 刪除設定失敗 ({key}): {str(e)}")
+            return False, f"❌ 刪除失敗: {str(e)[:100]}"
+    
+    # ============= 通知記錄查詢 (新增) =============
+    
+    def get_recent_notifications(self, limit: int = 10) -> List[Dict]:
+        """
+        獲取最近的通知記錄
+        
+        Args:
+            limit: 筆數限制
+        
+        Returns:
+            通知記錄列表
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    SELECT 
+                        id, category, recipient_type, room_number,
+                        notification_type, title, channel, status,
+                        sent_at, created_at, error_message
+                    FROM notification_logs
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                """, (limit,))
+                
+                columns = [desc[0] for desc in cursor.description]
+                rows = cursor.fetchall()
+                
+                log_db_operation("SELECT", "notification_logs", True, len(rows))
+                
+                return [dict(zip(columns, row)) for row in rows]
+        
+        except Exception as e:
+            log_db_operation("SELECT", "notification_logs", False, error=str(e))
+            logger.error(f"❌ 查詢最近通知失敗: {str(e)}")
+            return []
+    
+    def get_notification_logs(
+        self,
+        days: int = 7,
+        recipient_type: Optional[str] = None,
+        status: Optional[str] = None,
+        category: Optional[str] = None,
+        limit: int = 100
+    ) -> List[Dict]:
+        """
+        獲取通知日誌（帶篩選）
+        
+        Args:
+            days: 查詢天數
+            recipient_type: 接收者類型 (landlord/tenant)
+            status: 狀態 (sent/failed/pending)
+            category: 類別 (rent/electricity/system)
+            limit: 筆數限制
+        
+        Returns:
+            通知日誌列表
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # 建立篩選條件
+                conditions = ["created_at >= NOW() - INTERVAL '%s days'"]
+                params = [days]
+                
+                if recipient_type:
+                    conditions.append("recipient_type = %s")
+                    params.append(recipient_type)
+                
+                if status:
+                    conditions.append("status = %s")
+                    params.append(status)
+                
+                if category:
+                    conditions.append("category = %s")
+                    params.append(category)
+                
+                params.append(limit)
+                
+                query = f"""
+                    SELECT 
+                        id, category, recipient_type, recipient_id, room_number,
+                        notification_type, title, message, channel, status,
+                        sent_at, created_at, error_message, meta_json
+                    FROM notification_logs
+                    WHERE {' AND '.join(conditions)}
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                """
+                
+                cursor.execute(query, params)
+                
+                columns = [desc[0] for desc in cursor.description]
+                rows = cursor.fetchall()
+                
+                log_db_operation("SELECT", "notification_logs", True, len(rows))
+                logger.info(f"✅ 查詢通知日誌: {len(rows)} 筆")
+                
+                return [dict(zip(columns, row)) for row in rows]
+        
+        except Exception as e:
+            log_db_operation("SELECT", "notification_logs", False, error=str(e))
+            logger.error(f"❌ 查詢通知日誌失敗: {str(e)}")
+            return []
     
     # ============= 核心發送方法 =============
     
@@ -606,7 +848,7 @@ class NotificationService(BaseDBService):
             logger.error(f"❌ 自定義通知失敗: {str(e)}")
             return False, f"❌ {str(e)[:100]}"
     
-    # ============= 查詢通知歷史 =============
+    # ============= 查詢通知歷史 (保留舊方法以兼容) =============
     
     def get_notification_history(
         self,
@@ -616,7 +858,7 @@ class NotificationService(BaseDBService):
         limit: int = 100
     ) -> List[Dict]:
         """
-        查詢通知歷史
+        查詢通知歷史（舊方法，保留兼容性）
         
         Args:
             category: 類別篩選
