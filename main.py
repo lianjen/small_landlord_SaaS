@@ -1,3 +1,8 @@
+"""
+幸福之家 Pro - 租賃管理系統
+Nordic Edition v14.2
+"""
+
 import os
 from typing import Optional
 
@@ -89,16 +94,32 @@ css_path = os.path.join("assets", "style.css")
 load_css(css_path)
 
 # ============================================
-# 3. Database
+# 3. Database - 修復 Import 路徑
 # ============================================
 
-from services.db import SupabaseDB  # noqa: E402
+# ✅ 修正：使用 db_legacy 向後兼容層
+from services.db_legacy import SupabaseDB, get_database_instance  # noqa: E402
 
 
 @st.cache_resource
 def get_db() -> SupabaseDB:
-    """初始化並快取資料庫連線。"""
-    return SupabaseDB()
+    """
+    初始化並快取資料庫連線。
+    
+    使用 db_legacy 向後兼容層，內部自動調用新的模組化服務。
+    """
+    try:
+        db = get_database_instance()
+        
+        # 健康檢查
+        if not db.health_check():
+            st.error("⚠️ 資料庫健康檢查失敗，請檢查連線設定")
+            raise ConnectionError("Database health check failed")
+        
+        return db
+    except Exception as e:
+        st.error(f"❌ 資料庫初始化失敗: {e}")
+        raise
 
 
 # ============================================
@@ -107,17 +128,27 @@ def get_db() -> SupabaseDB:
 
 
 def main() -> None:
+    """主程式進入點"""
+    
     # 初始化資料庫
     try:
         db = get_db()
     except Exception as e:
         st.error(f"資料庫連線失敗: {e}")
+        st.info("💡 請確認 Streamlit Secrets 中已正確設定 SUPABASE_URL 和 SUPABASE_KEY")
+        
+        # 顯示除錯資訊（僅開發環境）
+        if APP_CONFIG["environment"] == "development":
+            st.exception(e)
+        
         st.stop()
 
     # ============ 側邊欄 ============
     with st.sidebar:
         st.title(f"🏠 {APP_CONFIG['title']}")
         st.caption(f"Nordic Edition {APP_CONFIG['version']} · {APP_CONFIG['environment']}")
+        
+        st.divider()
 
         menu = st.radio(
             "功能選單",
@@ -133,44 +164,74 @@ def main() -> None:
             ],
             label_visibility="collapsed",
         )
+        
+        # 系統狀態指示器
+        with st.expander("🔧 系統狀態", expanded=False):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # 資料庫狀態
+                try:
+                    if db.health_check():
+                        st.success("✅ 資料庫", icon="🗄️")
+                    else:
+                        st.error("❌ 資料庫", icon="🗄️")
+                except:
+                    st.error("❌ 資料庫", icon="🗄️")
+            
+            with col2:
+                # 環境資訊
+                env_icon = "🚀" if APP_CONFIG["environment"] == "production" else "🔧"
+                st.info(f"{env_icon} {APP_CONFIG['environment']}")
 
     # ============ 動態載入 Views (Lazy Loading) ============
     try:
         if menu == "📊 儀表板":
             from views import dashboard  # noqa: E402
-
             dashboard.render(db)
+            
         elif menu == "💰 租金管理":
             from views import rent  # noqa: E402
-
             rent.render(db)
+            
         elif menu == "📝 追蹤功能":
             from views import tracking  # noqa: E402
-
             tracking.render(db)
+            
         elif menu == "👥 房客管理":
             from views import tenants  # noqa: E402
-
             tenants.render(db)
+            
         elif menu == "⚡ 電費管理":
             from views import electricity  # noqa: E402
-
             electricity.render(db)
+            
         elif menu == "💸 支出記錄":
             from views import expenses  # noqa: E402
-
             expenses.render(db)
+            
         elif menu == "📬 通知管理":
             from views import notifications  # noqa: E402
-
             notifications.render(db)
+            
         elif menu == "⚙️ 系統設定":
             from views import settings  # noqa: E402
-
             settings.render(db)
+            
+    except ImportError as e:
+        st.error(f"❌ 無法載入頁面模組: {e}")
+        st.info("💡 請確認 views/ 目錄下對應的模組檔案存在")
+        
+        if APP_CONFIG["environment"] == "development":
+            st.exception(e)
+            
     except Exception as e:
-        st.error(f"載入頁面時發生錯誤: {e}")
-        st.exception(e)
+        st.error(f"❌ 載入頁面時發生錯誤: {e}")
+        
+        if APP_CONFIG["environment"] == "development":
+            st.exception(e)
+        else:
+            st.info("💡 系統發生錯誤，請聯繫管理員或稍後再試")
 
 
 # ============================================
