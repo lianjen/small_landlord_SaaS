@@ -127,7 +127,7 @@ class PaymentService(BaseDBService):
 
     def get_overdue_payments(self) -> List[Dict]:
         """
-        查詢逾期租金（狀態為 unpaid 且已超過 due_date）
+        查詢逾期租金（狀態為 unpaid 且到期日 <= 今天）
 
         Returns:
             List[Dict]: 逾期租金列表
@@ -150,7 +150,8 @@ class PaymentService(BaseDBService):
                         status,
                         (CURRENT_DATE - due_date) AS days_overdue
                     FROM payment_schedule
-                    WHERE status = 'unpaid' AND due_date < CURRENT_DATE
+                    WHERE status = 'unpaid'
+                      AND due_date <= CURRENT_DATE
                     ORDER BY due_date
                     """
                 )
@@ -373,7 +374,7 @@ class PaymentService(BaseDBService):
 
     def get_monthly_summary(self, year: int, month: int) -> Dict:
         """
-        本月摘要用的統計資料，對應 views.rent 中本月摘要指標。[cite:31]
+        本月摘要用的統計資料，對應 views.rent 中本月摘要指標。
 
         Returns:
             {
@@ -509,7 +510,7 @@ class PaymentService(BaseDBService):
     ) -> Tuple[bool, str]:
         """
         高階 API：依房號 + 年月，自動從 tenants 取 base_rent / tenant_name / payment_method 來建立租金排程。
-        對應 views.rent 批量建立排程使用。[cite:31]
+        對應 views.rent 批量建立排程使用。
         """
         try:
             with self.get_connection() as conn:
@@ -1061,7 +1062,7 @@ class PaymentService(BaseDBService):
         limit: int = 12,
     ) -> List[Dict]:
         """
-        房客繳款歷史（別名，供 views.rent.render_tenant_history_report 使用）[cite:31]
+        房客繳款歷史（別名，供 views.rent.render_tenant_history_report 使用）
         """
         return self.get_room_payment_history(room_number, limit=limit)
 
