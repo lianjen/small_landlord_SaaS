@@ -5,8 +5,8 @@
 ✅ 完整日誌記錄
 """
 
-from typing import List, Dict, Optional
-from services.basedb import BaseDBService
+from typing import List, Dict, Optional, Tuple  # ✅ 加入 Tuple
+from services.base_db import BaseDBService  # ✅ 修正：base_db (有底線)
 from services.logger import logger, log_db_operation
 
 
@@ -157,4 +157,134 @@ class MemoService(BaseDBService):
         
         Args:
             memo_id: 備忘錄 ID
+            text: 新的備忘內容
+            priority: 新的優先級
             
+        Returns:
+            (bool, str): 成功/失敗訊息
+        """
+        try:
+            if priority not in self.PRIORITY_OPTIONS and priority not in ["low", "normal", "high"]:
+                return False, f"無效優先級: {priority}"
+
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    UPDATE memos 
+                    SET memo_text = %s, priority = %s 
+                    WHERE id = %s
+                    """,
+                    (text, priority, memo_id)
+                )
+
+                log_db_operation("UPDATE", "memos", True, 1)
+                logger.info(f"✅ 更新備忘錄 ID: {memo_id}")
+                return True, "更新成功"
+
+        except Exception as e:
+            log_db_operation("UPDATE", "memos", False, error=str(e))
+            logger.error(f"❌ 更新失敗: {str(e)}")
+            return False, f"更新失敗: {str(e)[:100]}"
+
+    def get_memo_by_id(self, memo_id: int) -> Optional[Dict]:
+        """
+        根據 ID 查詢備忘錄
+        
+        Args:
+            memo_id: 備忘錄 ID
+            
+        Returns:
+            備忘錄字典，如果不存在返回 None
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT id, memo_text, priority, is_completed, created_at
+                    FROM memos
+                    WHERE id = %s
+                    """,
+                    (memo_id,)
+                )
+
+                row = cursor.fetchone()
+                if not row:
+                    return None
+
+                columns = [desc[0] for desc in cursor.description]
+                return dict(zip(columns, row))
+
+        except Exception as e:
+            logger.error(f"❌ 查詢失敗: {str(e)}")
+            return None
+
+    def get_pending_count(self) -> int:
+        """
+        取得待辦事項數量
+        
+        Returns:
+            未完成的備忘錄數量
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT COUNT(*) FROM memos WHERE is_completed = false"
+                )
+                
+                result = cursor.fetchone()
+                return result[0] if result else 0
+
+        except Exception as e:
+            logger.error(f"❌ 統計失敗: {str(e)}")
+            return 0
+
+    def get_statistics(self) -> Dict:
+        """
+        取得備忘錄統計資訊
+        
+        Returns:
+            統計字典 {total, pending, completed, by_priority}
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # 總計
+                cursor.execute("SELECT COUNT(*) FROM memos")
+                total = cursor.fetchone()[0]
+                
+                # 待辦
+                cursor.execute("SELECT COUNT(*) FROM memos WHERE is_completed = false")
+                pending = cursor.fetchone()[0]
+                
+                # 已完成
+                cursor.execute("SELECT COUNT(*) FROM memos WHERE is_completed = true")
+                completed = cursor.fetchone()[0]
+                
+                # 按優先級統計
+                cursor.execute("""
+                    SELECT priority, COUNT(*) 
+                    FROM memos 
+                    WHERE is_completed = false
+                    GROUP BY priority
+                """)
+                by_priority = {row[0]: row[1] for row in cursor.fetchall()}
+
+                return {
+                    "total": total,
+                    "pending": pending,
+                    "completed": completed,
+                    "by_priority": by_priority
+                }
+
+        except Exception as e:
+            logger.error(f"❌ 統計失敗: {str(e)}")
+            return {
+                "total": 0,
+                "pending": 0,
+                "completed": 0,
+                "by_priority": {}
+            }
