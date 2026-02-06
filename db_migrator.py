@@ -1,145 +1,175 @@
 """
-數據庫遷移工具 - v4.0
+數據庫遷移工具 - v4.1
 ✅ 自動檢測需要遷移的檔案
 ✅ 生成遷移報告
 ✅ 提供遷移建議
 """
 
-import os
 import re
+import sys
 from pathlib import Path
 from typing import List, Dict, Tuple
 
 
 class DBMigrator:
     """數據庫遷移工具"""
-    
+
     def __init__(self, project_root: str = "."):
         self.project_root = Path(project_root)
         self.views_dir = self.project_root / "views"
         self.repository_dir = self.project_root / "repository"
-        
-        # 需要遷移的模式
-        self.old_patterns = [
-            (r'from\s+services\.db\s+import\s+get_database_instance', 'db import'),
-            (r'from\s+services\.db\s+import\s+SupabaseDB', 'SupabaseDB import'),
-            (r'db\s*=\s*get_database_instance\(\)', 'db instance'),
-            (r'db\.get_tenants\(', 'tenant method'),
-            (r'db\.add_payment_schedule\(', 'payment method'),
-            (r'db\.trigger_auto_first_notification\(', 'notification method'),
+
+        # 需要遷移的模式（修正 regex：使用 \s 而不是 \\s）
+        self.old_patterns: List[Tuple[str, str]] = [
+            (
+                r"from\s+services\.db\s+import\s+get_database_instance",
+                "db import",
+            ),
+            (
+                r"from\s+services\.db\s+import\s+SupabaseDB",
+                "SupabaseDB import",
+            ),
+            (
+                r"db\s*=\s*get_database_instance\(",
+                "db instance",
+            ),
+            (
+                r"db\.get_tenants\(",
+                "tenant method",
+            ),
+            (
+                r"db\.add_payment_schedule\(",
+                "payment method",
+            ),
+            (
+                r"db\.trigger_auto_first_notification\(",
+                "notification method",
+            ),
         ]
-        
+
         # 新服務映射
-        self.service_mapping = {
-            'get_tenants': 'TenantService',
-            'add_tenant': 'TenantService',
-            'update_tenant': 'TenantService',
-            'delete_tenant': 'TenantService',
-            'get_payment_schedule': 'PaymentService',
-            'add_payment_schedule': 'PaymentService',
-            'mark_payment_done': 'PaymentService',
-            'get_overdue_payments': 'PaymentService',
-            'add_electricity_period': 'ElectricityService',
-            'save_electricity_record': 'ElectricityService',
-            'trigger_auto_first_notification': 'NotificationService',
-            'add_expense': 'ExpenseService',
-            'add_memo': 'MemoService',
+        self.service_mapping: Dict[str, str] = {
+            "get_tenants": "TenantService",
+            "add_tenant": "TenantService",
+            "update_tenant": "TenantService",
+            "delete_tenant": "TenantService",
+            "get_payment_schedule": "PaymentService",
+            "add_payment_schedule": "PaymentService",
+            "mark_payment_done": "PaymentService",
+            "get_overdue_payments": "PaymentService",
+            "add_electricity_period": "ElectricityService",
+            "save_electricity_record": "ElectricityService",
+            "trigger_auto_first_notification": "NotificationService",
+            "add_expense": "ExpenseService",
+            "add_memo": "MemoService",
         }
-    
+
+    # ==================== 掃描需要遷移的檔案 ====================
+
     def scan_files(self) -> List[Dict]:
         """掃描需要遷移的檔案"""
-        migration_files = []
-        
+        migration_files: List[Dict] = []
+
         # 掃描 views/ 目錄
         if self.views_dir.exists():
             for py_file in self.views_dir.glob("*.py"):
                 matches = self._check_file(py_file)
                 if matches:
-                    migration_files.append({
-                        'file': str(py_file.relative_to(self.project_root)),
-                        'matches': matches,
-                        'priority': 'high' if 'trigger_auto_first_notification' in str(matches) else 'medium'
-                    })
-        
+                    migration_files.append(
+                        {
+                            "file": str(py_file.relative_to(self.project_root)),
+                            "matches": matches,
+                            "priority": "high"
+                            if any(
+                                "trigger_auto_first_notification" in m[1]
+                                for m in matches
+                            )
+                            else "medium",
+                        }
+                    )
+
         # 掃描 repository/ 目錄
         if self.repository_dir.exists():
             for py_file in self.repository_dir.glob("*.py"):
                 matches = self._check_file(py_file)
                 if matches:
-                    migration_files.append({
-                        'file': str(py_file.relative_to(self.project_root)),
-                        'matches': matches,
-                        'priority': 'low'
-                    })
-        
+                    migration_files.append(
+                        {
+                            "file": str(py_file.relative_to(self.project_root)),
+                            "matches": matches,
+                            "priority": "low",
+                        }
+                    )
+
         return migration_files
-    
+
     def _check_file(self, file_path: Path) -> List[Tuple[str, str]]:
         """檢查檔案是否需要遷移"""
-        matches = []
-        
+        matches: List[Tuple[str, str]] = []
+
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-                
-                for pattern, desc in self.old_patterns:
-                    if re.search(pattern, content):
-                        matches.append((desc, pattern))
-        
+            content = file_path.read_text(encoding="utf-8")
+
+            for pattern, desc in self.old_patterns:
+                if re.search(pattern, content):
+                    matches.append((desc, pattern))
+
         except Exception as e:
             print(f"⚠️ 讀取檔案失敗: {file_path} - {e}")
-        
+
         return matches
-    
+
+    # ==================== 遷移報告 ====================
+
     def generate_migration_report(self) -> str:
         """生成遷移報告"""
         migration_files = self.scan_files()
-        
+
         if not migration_files:
             return """
-    ╔══════════════════════════════════════════════════════════════════╗
-    ║              ✅ 恭喜！無需遷移的檔案                             ║
-    ╚══════════════════════════════════════════════════════════════════╝
-    
-    所有檔案都已使用新的模組化服務，或者未檢測到舊的 db.py 調用。
-    """
-        
+╔══════════════════════════════════════════════════════════════════╗
+║              ✅ 恭喜！無需遷移的檔案                             ║
+╚══════════════════════════════════════════════════════════════════╝
+
+所有檔案都已使用新的模組化服務，或者未檢測到舊的 db.py 調用。
+"""
+
         report = f"""
 ╔══════════════════════════════════════════════════════════════════╗
-║              📊 數據庫遷移報告 - v4.0                            ║
+║              📊 數據庫遷移報告 - v4.1                            ║
 ╚══════════════════════════════════════════════════════════════════╝
 
 檢測到 {len(migration_files)} 個檔案需要遷移：
 
 """
-        
+
         # 按優先級排序
-        high_priority = [f for f in migration_files if f['priority'] == 'high']
-        medium_priority = [f for f in migration_files if f['priority'] == 'medium']
-        low_priority = [f for f in migration_files if f['priority'] == 'low']
-        
+        high_priority = [f for f in migration_files if f["priority"] == "high"]
+        medium_priority = [f for f in migration_files if f["priority"] == "medium"]
+        low_priority = [f for f in migration_files if f["priority"] == "low"]
+
         if high_priority:
             report += "🔴 高優先級（包含新功能）\n" + "=" * 70 + "\n"
             for file_info in high_priority:
                 report += f"\n📄 {file_info['file']}\n"
-                for desc, _ in file_info['matches']:
+                for desc, _ in file_info["matches"]:
                     report += f"   - {desc}\n"
-        
+
         if medium_priority:
             report += "\n🟡 中優先級（views/ 目錄）\n" + "=" * 70 + "\n"
             for file_info in medium_priority:
                 report += f"\n📄 {file_info['file']}\n"
-                for desc, _ in file_info['matches']:
+                for desc, _ in file_info["matches"]:
                     report += f"   - {desc}\n"
-        
+
         if low_priority:
             report += "\n🟢 低優先級（repository/ 目錄）\n" + "=" * 70 + "\n"
             for file_info in low_priority:
                 report += f"\n📄 {file_info['file']}\n"
-                for desc, _ in file_info['matches']:
+                for desc, _ in file_info["matches"]:
                     report += f"   - {desc}\n"
-        
-        report += f"""
+
+        report += """
 
 ╔══════════════════════════════════════════════════════════════════╗
 ║              🎯 遷移建議                                         ║
@@ -194,88 +224,82 @@ class DBMigrator:
    └─ 所有檔案使用新服務
 
 """
-        
         return report
-    
+
+    # ==================== 單檔建議 ====================
+
     def suggest_migration(self, file_path: str) -> str:
         """為特定檔案生成遷移建議"""
-        file_path = Path(file_path)
-        
-        if not file_path.exists():
-            return f"❌ 檔案不存在: {file_path}"
-        
+        file = Path(file_path)
+
+        if not file.exists():
+            return f"❌ 檔案不存在: {file}"
+
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
+            content = file.read_text(encoding="utf-8")
+
             # 檢測使用的方法
-            used_methods = []
+            used_methods: List[Tuple[str, str]] = []
             for method, service in self.service_mapping.items():
-                if f'db.{method}(' in content:
+                if f"db.{method}(" in content:
                     used_methods.append((method, service))
-            
+
             if not used_methods:
-                return f"✅ {file_path.name} 無需遷移"
-            
+                return f"✅ {file.name} 無需遷移"
+
             suggestion = f"""
 ╔══════════════════════════════════════════════════════════════════╗
-║      📝 遷移建議: {file_path.name}                               
+║      📝 遷移建議: {file.name}
 ╚══════════════════════════════════════════════════════════════════╝
 
 檢測到使用的方法：
 """
-            
             for method, service in used_methods:
                 suggestion += f"  - db.{method}() → {service}\n"
-            
+
             # 生成新程式碼
-            services_needed = list(set([s for _, s in used_methods]))
-            
-            suggestion += f"""
+            services_needed = list({s for _, s in used_methods})
+
+            suggestion += """
 
 建議的新程式碼：
 ─────────────────────────────────────────
 
 # 1. 在檔案開頭新增 imports
 """
-            
             for service in services_needed:
-                suggestion += f"from services.{service.lower().replace('service', '_service')} import {service}\n"
-            
-            suggestion += f"""
+                module = service.lower().replace("service", "_service")
+                suggestion += f"from services.{module} import {service}\n"
+
+            suggestion += """
 
 # 2. 在初始化處建立服務實例
 """
-            
             for service in services_needed:
-                var_name = service.lower().replace('service', '_svc')
+                var_name = service.lower().replace("service", "_svc")
                 suggestion += f"{var_name} = {service}()\n"
-            
-            suggestion += f"""
+
+            suggestion += """
 
 # 3. 替換方法調用
 """
-            
             for method, service in used_methods:
-                var_name = service.lower().replace('service', '_svc')
+                var_name = service.lower().replace("service", "_svc")
                 suggestion += f"db.{method}(...) → {var_name}.{method}(...)\n"
-            
+
             return suggestion
-        
+
         except Exception as e:
             return f"❌ 處理檔案失敗: {e}"
 
 
 # ============================================================================
-# 命令列工具
-# ============================================================================
+
 
 def main():
-    """主程式"""
-    import sys
-    
+    """命令列工具主程式"""
     migrator = DBMigrator()
-    
+
     if len(sys.argv) > 1:
         # 為特定檔案生成建議
         file_path = sys.argv[1]
