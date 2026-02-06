@@ -1,8 +1,9 @@
 """
-LINE 綁定管理介面 - v1.1
+LINE 綁定管理介面 - v1.2
 ✅ 綁定狀態總覽（支援新舊欄位命名）
+✅ 顯示並區分「已驗證 / 待驗證 / 未綁定」
 ✅ 批量解除綁定
-✅ 單一房客綁定設定
+✅ 單一房客綁定設定（後台以 tenant_id 綁定，視為已驗證）
 """
 
 import logging
@@ -104,12 +105,12 @@ def render_binding_overview(tenant_svc: TenantService, contact_svc: TenantContac
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        if st.button("✅ 已綁定", key="filter_bound", use_container_width=True, type="primary"):
+        if st.button("✅ 已驗證綁定", key="filter_bound", use_container_width=True, type="primary"):
             st.session_state.line_filter = "bound"
             st.rerun()
 
     with col2:
-        if st.button("📭 未綁定", key="filter_unbound", use_container_width=True):
+        if st.button("📭 未驗證 / 未綁定", key="filter_unbound", use_container_width=True):
             st.session_state.line_filter = "unbound"
             st.rerun()
 
@@ -157,15 +158,27 @@ def render_binding_overview(tenant_svc: TenantService, contact_svc: TenantContac
             # 查詢綁定狀態
             contact = contact_svc.get_tenant_contact(tenant_id)
 
-            if contact and contact.get("line_user_id"):
-                line_id = contact["line_user_id"]
+            line_id = contact.get("line_user_id") if contact else None
+            is_verified = bool(contact.get("is_verified", False)) if contact else False
+
+            if line_id:
                 masked_id = f"{line_id[:8]}...{line_id[-4:]}" if len(line_id) > 12 else line_id
-                status = "✅ 已綁定"
-                notify_rent = "✅" if contact.get("notify_rent", False) else "❌"
-                notify_elec = "✅" if contact.get("notify_electricity", False) else "❌"
             else:
                 masked_id = "-"
-                status = "📭 未綁定"
+
+            if line_id and is_verified:
+                bind_status = "✅ 已綁定"
+                verify_status = "✅ 已驗證"
+                notify_rent = "✅" if contact.get("notify_rent", False) else "❌"
+                notify_elec = "✅" if contact.get("notify_electricity", False) else "❌"
+            elif line_id and not is_verified:
+                bind_status = "⏳ 待驗證"
+                verify_status = "⏳ 待驗證"
+                notify_rent = "⏳"  # 尚未正式啟用
+                notify_elec = "⏳"
+            else:
+                bind_status = "📭 未綁定"
+                verify_status = "📭 未綁定"
                 notify_rent = "-"
                 notify_elec = "-"
 
@@ -175,7 +188,8 @@ def render_binding_overview(tenant_svc: TenantService, contact_svc: TenantContac
                     "房號": room_number,
                     "房客": tenant_name,
                     "電話": phone,
-                    "綁定狀態": status,
+                    "綁定狀態": bind_status,
+                    "驗證狀態": verify_status,
                     "LINE ID": masked_id,
                     "租金通知": notify_rent,
                     "電費通知": notify_elec,
@@ -196,10 +210,10 @@ def render_binding_overview(tenant_svc: TenantService, contact_svc: TenantContac
             st.metric("總房客數", f"{total_tenants} 人")
 
         with col2:
-            st.metric("已綁定", f"{bound_count} 人")
+            st.metric("已驗證綁定", f"{bound_count} 人")
 
         with col3:
-            st.metric("未綁定", f"{unbound_count} 人")
+            st.metric("未驗證 / 未綁定", f"{unbound_count} 人")
 
         with col4:
             st.metric("綁定率", f"{binding_rate:.1f}%")
@@ -211,10 +225,10 @@ def render_binding_overview(tenant_svc: TenantService, contact_svc: TenantContac
 
         if current_filter == "bound":
             df = df[df["綁定狀態"] == "✅ 已綁定"]
-            st.info(f"📊 顯示：已綁定（共 {len(df)} 筆）")
+            st.info(f"📊 顯示：已驗證綁定（共 {len(df)} 筆）")
         elif current_filter == "unbound":
-            df = df[df["綁定狀態"] == "📭 未綁定"]
-            st.info(f"📊 顯示：未綁定（共 {len(df)} 筆）")
+            df = df[df["綁定狀態"] != "✅ 已綁定"]
+            st.info(f"📊 顯示：未驗證 / 未綁定（共 {len(df)} 筆）")
         else:
             st.info(f"📊 顯示：全部（共 {len(df)} 筆）")
 
@@ -227,7 +241,7 @@ def render_binding_overview(tenant_svc: TenantService, contact_svc: TenantContac
 
         df_sorted = df.sort_values(["綁定狀態", "房號"], ascending=[True, True])
 
-        display_cols = ["房號", "房客", "電話", "綁定狀態", "LINE ID", "租金通知", "電費通知"]
+        display_cols = ["房號", "房客", "電話", "綁定狀態", "驗證狀態", "LINE ID", "租金通知", "電費通知"]
 
         st.dataframe(
             df_sorted[display_cols],
@@ -235,8 +249,8 @@ def render_binding_overview(tenant_svc: TenantService, contact_svc: TenantContac
             hide_index=True,
         )
 
-        # === 批量解除綁定（用完整 df_all，和當前篩選無關） ===
-        bound_df = df_all[df_all["綁定狀態"] == "✅ 已綁定"]
+        # === 批量解除綁定（只對「有 line_user_id」的做，多數會是 已綁定 or 待驗證） ===
+        bound_df = df_all[df_all["LINE ID"] != "-"]
 
         if not bound_df.empty:
             st.divider()
@@ -296,7 +310,7 @@ def render_binding_overview(tenant_svc: TenantService, contact_svc: TenantContac
 # ==================== Tab 2: 綁定設定 ====================
 
 def render_binding_editor(tenant_svc: TenantService, contact_svc: TenantContactService) -> None:
-    """單一房客綁定設定"""
+    """單一房客綁定設定（後台手動綁定 / 解綁）"""
 
     st.subheader("🔗 LINE 綁定設定")
 
@@ -352,7 +366,11 @@ def render_binding_editor(tenant_svc: TenantService, contact_svc: TenantContactS
             with col2:
                 notify_rent = contact_info.get("notify_rent", True)
                 notify_elec = contact_info.get("notify_electricity", True)
+                is_verified = bool(contact_info.get("is_verified", False))
+                status_text = "✅ 已驗證" if is_verified else "⏳ 待驗證"
+
                 st.info(
+                    f"**綁定狀態:** {status_text}\n\n"
                     f"**通知設定:** 租金 {'✅' if notify_rent else '❌'} / 電費 {'✅' if notify_elec else '❌'}"
                 )
 
@@ -420,14 +438,14 @@ def render_binding_editor(tenant_svc: TenantService, contact_svc: TenantContactS
 
         st.divider()
 
-        # === 新增/更新綁定 ===
+        # === 新增/更新綁定（後台直接用 LINE User ID 建立綁定，視為已驗證） ===
         with st.form(key=f"bind_form_{tenant_id}"):
             st.markdown("#### 🔗 新增/更新 LINE 綁定")
 
             line_user_id = st.text_input(
                 "LINE User ID",
                 placeholder="U1234567890abcdef1234567890abcdef",
-                help="從 LINE Bot Webhook 取得的 User ID（通常以 'U' 開頭，長度 33 字元）",
+                help="從 LINE Bot Webhook 取得的 User ID（通常以 'U' 開頭，長度約 33 字元）",
                 key=f"line_id_input_{tenant_id}",
             )
 
