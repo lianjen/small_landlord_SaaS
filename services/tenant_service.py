@@ -1,5 +1,5 @@
 """
-租客管理服務 - v3.0 Final
+租客管理服務 - v3.1
 ✅ 租客 CRUD 操作
 ✅ 房間佔用檢查
 ✅ 常量驗證
@@ -7,6 +7,9 @@
 ✅ 與其他模組兼容
 ✅ SQL 注入防護
 ✅ DataFrame 安全處理
+✅ 與 tenant_contacts 整合：
+   - 更新房號時同步更新 tenant_contacts.room_number
+   - 刪除租客時清空 tenant_contacts 綁定狀態
 """
 
 import pandas as pd
@@ -23,44 +26,59 @@ try:
 except ImportError:
     logger.warning("⚠️ 無法載入 config.constants，使用備用常量")
     CONSTANTS_LOADED = False
-    
+
     class BackupConstants:
         class ROOMS:
-            ALL_ROOMS = ["1A", "1B", "2A", "2B", "3A", "3B", "3C", "3D", "4A", "4B", "4C", "4D"]
-        
+            ALL_ROOMS = [
+                "1A",
+                "1B",
+                "2A",
+                "2B",
+                "3A",
+                "3B",
+                "3C",
+                "3D",
+                "4A",
+                "4B",
+                "4C",
+                "4D",
+            ]
+
         class PAYMENT:
             METHODS = ["现金", "转账", "其他"]
-    
+
     ROOMS = BackupConstants.ROOMS
     PAYMENT = BackupConstants.PAYMENT
 
 
 class TenantService(BaseDBService):
     """租客管理服務 (繼承 BaseDBService)"""
-    
+
     def __init__(self):
         super().__init__()
         self.all_rooms = ROOMS.ALL_ROOMS
         self.payment_methods = PAYMENT.METHODS
-    
+
     # ==================== 查詢操作 ====================
-    
+
     def get_tenants(self, active_only: bool = True) -> pd.DataFrame:
         """
         獲取租客列表（返回 DataFrame）
-        
+
         Args:
             active_only: 是否只查詢活躍租客
-        
+
         Returns:
             租客 DataFrame
         """
+
         def query():
             with self.get_connection() as conn:
                 cursor = conn.cursor()
-                
+
                 condition = "WHERE is_active = true" if active_only else ""
-                cursor.execute(f"""
+                cursor.execute(
+                    f"""
                     SELECT id, room_number, tenant_name, phone, deposit, base_rent,
                            lease_start, lease_end, payment_method, has_water_fee,
                            annual_discount_months, discount_notes, last_ac_cleaning_date,
@@ -68,174 +86,181 @@ class TenantService(BaseDBService):
                     FROM tenants
                     {condition}
                     ORDER BY room_number
-                """)
-                
+                """
+                )
+
                 columns = [desc[0] for desc in cursor.description]
                 data = cursor.fetchall()
-                
+
                 if not data:
                     logger.info("📭 無租客記錄")
                     return pd.DataFrame(columns=columns)
-                
+
                 log_db_operation("SELECT", "tenants", True, len(data))
                 logger.info(f"✅ 查詢到 {len(data)} 位租客")
                 return pd.DataFrame(data, columns=columns)
-        
+
         return self.retry_on_failure(query)
-    
+
     def get_all_tenants(self, include_inactive: bool = True) -> List[Dict]:
         """
         取得所有房客（返回列表格式）
-        
+
         Args:
             include_inactive: 是否包含已停用的房客
-        
+
         Returns:
             房客列表
         """
         try:
             df = self.get_tenants(active_only=not include_inactive)
-            
+
             # ✅ 確保 df 是 DataFrame
             if not isinstance(df, pd.DataFrame):
                 logger.error(f"❌ 回傳類型錯誤: 期望 DataFrame，實際 {type(df)}")
                 return []
-            
+
             if df.empty:
                 logger.info("📭 無房客記錄")
                 return []
-            
-            result = df.to_dict('records')
+
+            result = df.to_dict("records")
             logger.info(f"✅ 取得 {len(result)} 筆房客資料")
             return result
-        
+
         except AttributeError as e:
             logger.error(f"❌ DataFrame 操作錯誤: {str(e)}", exc_info=True)
             return []
-        
+
         except Exception as e:
             logger.error(f"❌ 取得所有房客失敗: {str(e)}", exc_info=True)
             return []
-    
+
     def get_active_tenants(self) -> List[Dict]:
         """
         取得所有有效房客
-        
+
         Returns:
             有效房客列表
         """
         try:
             df = self.get_tenants(active_only=True)
-            
+
             if not isinstance(df, pd.DataFrame):
                 logger.error(f"❌ 回傳類型錯誤: 期望 DataFrame，實際 {type(df)}")
                 return []
-            
+
             if df.empty:
                 logger.info("📭 無有效房客")
                 return []
-            
-            result = df.to_dict('records')
+
+            result = df.to_dict("records")
             logger.info(f"✅ 取得 {len(result)} 筆有效房客")
             return result
-        
+
         except Exception as e:
             logger.error(f"❌ 取得有效房客失敗: {str(e)}", exc_info=True)
             return []
-    
+
     def get_tenant_by_id(self, tenant_id: int) -> Optional[Dict]:
         """
         根據 ID 查詢租客
-        
+
         Args:
             tenant_id: 租客 ID
-        
+
         Returns:
             租客資訊字典，如果不存在返回 None
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
-                
-                cursor.execute("""
+
+                cursor.execute(
+                    """
                     SELECT id, room_number, tenant_name, phone, deposit, base_rent,
                            lease_start, lease_end, payment_method, has_water_fee,
                            annual_discount_months, discount_notes, is_active
                     FROM tenants
                     WHERE id = %s
-                """, (tenant_id,))
-                
+                """,
+                    (tenant_id,),
+                )
+
                 row = cursor.fetchone()
-                
+
                 if not row:
                     logger.warning(f"⚠️ 找不到租客 ID: {tenant_id}")
                     return None
-                
+
                 columns = [desc[0] for desc in cursor.description]
                 log_db_operation("SELECT", "tenants", True, 1)
                 return dict(zip(columns, row))
-        
+
         except Exception as e:
             log_db_operation("SELECT", "tenants", False, error=str(e))
             logger.error(f"❌ 查詢失敗: {str(e)}", exc_info=True)
             return None
-    
+
     def get_tenant_by_room(self, room_number: str) -> Optional[Dict]:
         """
         根據房號查詢租客
-        
+
         Args:
             room_number: 房號
-        
+
         Returns:
             租客資訊字典，如果不存在返回 None
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
-                
-                cursor.execute("""
+
+                cursor.execute(
+                    """
                     SELECT id, room_number, tenant_name, phone, deposit, base_rent,
                            lease_start, lease_end, payment_method, has_water_fee,
                            annual_discount_months, discount_notes, is_active
                     FROM tenants
                     WHERE room_number = %s AND is_active = true
-                """, (room_number,))
-                
+                """,
+                    (room_number,),
+                )
+
                 row = cursor.fetchone()
-                
+
                 if not row:
                     logger.info(f"📭 房間 {room_number} 目前無租客")
                     return None
-                
+
                 columns = [desc[0] for desc in cursor.description]
                 log_db_operation("SELECT", "tenants", True, 1)
                 return dict(zip(columns, row))
-        
+
         except Exception as e:
             log_db_operation("SELECT", "tenants", False, error=str(e))
             logger.error(f"❌ 查詢失敗: {str(e)}", exc_info=True)
             return None
-    
+
     # ==================== 新增操作 ====================
-    
+
     def add_tenant(
-        self, 
-        room: str, 
-        name: str, 
-        phone: str, 
-        deposit: float, 
+        self,
+        room: str,
+        name: str,
+        phone: str,
+        deposit: float,
         base_rent: float,
-        start: date, 
-        end: date, 
-        payment_method: str, 
+        start: date,
+        end: date,
+        payment_method: str,
         has_water_fee: bool = False,
-        annual_discount_months: int = 0, 
-        discount_notes: str = ""
+        annual_discount_months: int = 0,
+        discount_notes: str = "",
     ) -> Tuple[bool, str]:
         """
         新增租客
-        
+
         Args:
             room: 房號
             name: 租客姓名
@@ -248,7 +273,7 @@ class TenantService(BaseDBService):
             has_water_fee: 是否包含水費
             annual_discount_months: 年度折扣月數
             discount_notes: 折扣備註
-        
+
         Returns:
             (bool, str): 成功/失敗訊息
         """
@@ -257,89 +282,105 @@ class TenantService(BaseDBService):
             if room not in self.all_rooms:
                 logger.warning(f"❌ 房號無效: {room}")
                 return False, f"無效房號: {room}"
-            
+
             # 驗證付款方式
             if payment_method not in self.payment_methods:
                 logger.warning(f"❌ 支付方式無效: {payment_method}")
                 return False, f"無效支付方式: {payment_method}"
-            
+
             # 驗證日期邏輯
             if start >= end:
                 logger.warning(f"❌ 日期邏輯錯誤: 開始日 {start} >= 結束日 {end}")
                 return False, "租約開始日必須早於結束日"
-            
+
             with self.get_connection() as conn:
                 cursor = conn.cursor()
-                
+
                 # 檢查房間是否已被佔用
                 cursor.execute(
                     "SELECT COUNT(*) FROM tenants WHERE room_number = %s AND is_active = true",
-                    (room,)
+                    (room,),
                 )
-                
+
                 if cursor.fetchone()[0] > 0:
                     logger.warning(f"❌ 房間已被佔用: {room}")
                     return False, f"房間 {room} 已有租客"
-                
+
                 # 插入租客
-                cursor.execute("""
+                cursor.execute(
+                    """
                     INSERT INTO tenants 
                     (room_number, tenant_name, phone, deposit, base_rent, lease_start, 
                      lease_end, payment_method, has_water_fee, annual_discount_months, discount_notes)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """, (room, name, phone, deposit, base_rent, start, end, 
-                      payment_method, has_water_fee, annual_discount_months, discount_notes))
-                
+                """,
+                    (
+                        room,
+                        name,
+                        phone,
+                        deposit,
+                        base_rent,
+                        start,
+                        end,
+                        payment_method,
+                        has_water_fee,
+                        annual_discount_months,
+                        discount_notes,
+                    ),
+                )
+
                 log_db_operation("INSERT", "tenants", True, 1)
                 logger.info(f"✅ 新增租客: {name} ({room})")
                 return True, f"成功新增租客 {name}"
-        
+
         except Exception as e:
             log_db_operation("INSERT", "tenants", False, error=str(e))
             logger.error(f"❌ 新增失敗: {str(e)}", exc_info=True)
             return False, f"新增失敗: {str(e)[:100]}"
-    
+
     def create_tenant(self, tenant_data: Dict) -> Optional[int]:
         """
         新增房客（別名方法，返回 ID）
-        
+
         Args:
             tenant_data: 房客資料字典
-        
+
         Returns:
             新增房客的 ID，失敗返回 None
         """
         try:
             success, msg = self.add_tenant(
-                room=tenant_data['room_number'],
-                name=tenant_data['tenant_name'],
-                phone=tenant_data.get('phone', ''),
-                deposit=tenant_data['deposit'],
-                base_rent=tenant_data['base_rent'],
-                start=tenant_data['lease_start'],
-                end=tenant_data['lease_end'],
-                payment_method=tenant_data['payment_method'],
-                has_water_fee=tenant_data.get('has_water_fee', False),
-                annual_discount_months=tenant_data.get('annual_discount_months', 0),
-                discount_notes=tenant_data.get('discount_notes', '')
+                room=tenant_data["room_number"],
+                name=tenant_data["tenant_name"],
+                phone=tenant_data.get("phone", ""),
+                deposit=tenant_data["deposit"],
+                base_rent=tenant_data["base_rent"],
+                start=tenant_data["lease_start"],
+                end=tenant_data["lease_end"],
+                payment_method=tenant_data["payment_method"],
+                has_water_fee=tenant_data.get("has_water_fee", False),
+                annual_discount_months=tenant_data.get(
+                    "annual_discount_months", 0
+                ),
+                discount_notes=tenant_data.get("discount_notes", ""),
             )
-            
+
             if success:
                 # 取得剛新增的租客 ID
-                tenant = self.get_tenant_by_room(tenant_data['room_number'])
-                return tenant['id'] if tenant else None
-            
+                tenant = self.get_tenant_by_room(tenant_data["room_number"])
+                return tenant["id"] if tenant else None
+
             return None
-        
+
         except Exception as e:
             logger.error(f"❌ 新增房客失敗: {str(e)}", exc_info=True)
             return None
-    
+
     # ==================== 更新操作 ====================
-    
+
     def update_tenant(
-        self, 
-        tenant_id: int, 
+        self,
+        tenant_id: int,
         room: str = None,
         name: str = None,
         phone: str = None,
@@ -351,124 +392,221 @@ class TenantService(BaseDBService):
         has_water_fee: bool = None,
         annual_discount_months: int = None,
         discount_notes: str = None,
-        tenant_data: Dict = None
+        tenant_data: Dict = None,
     ) -> Tuple[bool, str]:
         """
         更新租客資訊（支援兩種調用方式）
-        
+
         方式1：單獨參數
         方式2：使用 tenant_data 字典
-        
+
         Args:
             tenant_id: 租客 ID
             其他參數: 要更新的欄位（可選）
             tenant_data: 包含所有更新欄位的字典（可選）
-        
+
         Returns:
             (bool, str): 成功/失敗訊息
         """
         try:
             # 如果提供了 tenant_data，從中提取參數
             if tenant_data:
-                room = tenant_data.get('room_number', room)
-                name = tenant_data.get('tenant_name', name)
-                phone = tenant_data.get('phone', phone)
-                deposit = tenant_data.get('deposit', deposit)
-                base_rent = tenant_data.get('base_rent', base_rent)
-                start = tenant_data.get('lease_start', start)
-                end = tenant_data.get('lease_end', end)
-                payment_method = tenant_data.get('payment_method', payment_method)
-                has_water_fee = tenant_data.get('has_water_fee', has_water_fee)
-                annual_discount_months = tenant_data.get('annual_discount_months', annual_discount_months)
-                discount_notes = tenant_data.get('discount_notes', discount_notes)
-            
+                room = tenant_data.get("room_number", room)
+                name = tenant_data.get("tenant_name", name)
+                phone = tenant_data.get("phone", phone)
+                deposit = tenant_data.get("deposit", deposit)
+                base_rent = tenant_data.get("base_rent", base_rent)
+                start = tenant_data.get("lease_start", start)
+                end = tenant_data.get("lease_end", end)
+                payment_method = tenant_data.get("payment_method", payment_method)
+                has_water_fee = tenant_data.get("has_water_fee", has_water_fee)
+                annual_discount_months = tenant_data.get(
+                    "annual_discount_months", annual_discount_months
+                )
+                discount_notes = tenant_data.get(
+                    "discount_notes", discount_notes
+                )
+
             # 驗證必要欄位
-            if not all([room, name, deposit is not None, base_rent is not None, start, end, payment_method]):
+            if not all(
+                [
+                    room,
+                    name,
+                    deposit is not None,
+                    base_rent is not None,
+                    start,
+                    end,
+                    payment_method,
+                ]
+            ):
                 return False, "缺少必要欄位"
-            
+
             # 驗證房號和付款方式
             if room not in self.all_rooms:
                 return False, f"無效房號: {room}"
             if payment_method not in self.payment_methods:
                 return False, f"無效支付方式: {payment_method}"
-            
+
             # 驗證日期邏輯
             if start >= end:
                 return False, "租約開始日必須早於結束日"
-            
+
             with self.get_connection() as conn:
                 cursor = conn.cursor()
-                
+
                 # 檢查租客是否存在
-                cursor.execute("SELECT COUNT(*) FROM tenants WHERE id = %s", (tenant_id,))
-                if cursor.fetchone()[0] == 0:
+                cursor.execute(
+                    "SELECT room_number FROM tenants WHERE id = %s",
+                    (tenant_id,),
+                )
+                row = cursor.fetchone()
+                if not row:
                     return False, f"租客 ID {tenant_id} 不存在"
-                
-                cursor.execute("""
+
+                old_room = row[0]
+
+                # 更新 tenants 資料
+                cursor.execute(
+                    """
                     UPDATE tenants SET
                         room_number = %s, tenant_name = %s, phone = %s, deposit = %s,
                         base_rent = %s, lease_start = %s, lease_end = %s, payment_method = %s,
                         has_water_fee = %s, annual_discount_months = %s, discount_notes = %s,
                         updated_at = NOW()
                     WHERE id = %s
-                """, (room, name, phone or '', deposit, base_rent, start, end, 
-                      payment_method, has_water_fee or False, annual_discount_months or 0, 
-                      discount_notes or '', tenant_id))
-                
+                """,
+                    (
+                        room,
+                        name,
+                        phone or "",
+                        deposit,
+                        base_rent,
+                        start,
+                        end,
+                        payment_method,
+                        has_water_fee or False,
+                        annual_discount_months or 0,
+                        discount_notes or "",
+                        tenant_id,
+                    ),
+                )
+
                 log_db_operation("UPDATE", "tenants", True, 1)
                 logger.info(f"✅ 更新租客 ID: {tenant_id}")
+
+                # 若房號有變更，順便同步更新 tenant_contacts.room_number
+                if old_room != room:
+                    cursor.execute(
+                        """
+                        UPDATE tenant_contacts
+                        SET room_number = %s,
+                            updated_at = NOW()
+                        WHERE tenant_id = %s
+                        """,
+                        (room, tenant_id),
+                    )
+                    if cursor.rowcount > 0:
+                        logger.info(
+                            f"🔄 已同步更新 tenant_contacts.room_number: "
+                            f"{old_room} -> {room} (tenant_id={tenant_id})"
+                        )
+
                 return True, f"成功更新租客 {name}"
-        
+
         except Exception as e:
             log_db_operation("UPDATE", "tenants", False, error=str(e))
             logger.error(f"❌ 更新失敗: {str(e)}", exc_info=True)
             return False, f"更新失敗: {str(e)[:100]}"
-    
+
     # ==================== 刪除操作 ====================
-    
+
     def delete_tenant(self, tenant_id: int) -> Tuple[bool, str]:
         """
         刪除租客（軟刪除）
-        
+
+        行為：
+        - tenants.is_active = false
+        - 同步清理 tenant_contacts 中的綁定資訊：
+            line_user_id = NULL
+            is_verified = false
+            room_number = NULL
+            pending_room / verification_code / verification_expires_at = NULL
+
         Args:
             tenant_id: 租客 ID
-        
+
         Returns:
             (bool, str): 成功/失敗訊息
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
-                
+
                 # 檢查租客是否存在
-                cursor.execute("SELECT tenant_name FROM tenants WHERE id = %s", (tenant_id,))
+                cursor.execute(
+                    "SELECT tenant_name FROM tenants WHERE id = %s",
+                    (tenant_id,),
+                )
                 row = cursor.fetchone()
-                
+
                 if not row:
                     return False, f"租客 ID {tenant_id} 不存在"
-                
+
                 tenant_name = row[0]
-                
-                cursor.execute("UPDATE tenants SET is_active = false, updated_at = NOW() WHERE id = %s", (tenant_id,))
-                
+
+                # 軟刪除 tenants
+                cursor.execute(
+                    """
+                    UPDATE tenants
+                    SET is_active = false,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (tenant_id,),
+                )
+
                 log_db_operation("UPDATE", "tenants (soft delete)", True, 1)
-                logger.info(f"✅ 刪除租客 ID: {tenant_id} ({tenant_name})")
+                logger.info(
+                    f"✅ 刪除租客 ID: {tenant_id} ({tenant_name})"
+                )
+
+                # 同步清理 tenant_contacts 綁定狀態
+                cursor.execute(
+                    """
+                    UPDATE tenant_contacts
+                    SET
+                        line_user_id = NULL,
+                        is_verified = false,
+                        room_number = NULL,
+                        pending_room = NULL,
+                        verification_code = NULL,
+                        verification_expires_at = NULL,
+                        updated_at = NOW()
+                    WHERE tenant_id = %s
+                    """,
+                    (tenant_id,),
+                )
+                if cursor.rowcount > 0:
+                    logger.info(
+                        f"🔄 已清理 tenant_contacts 綁定狀態 (tenant_id={tenant_id})"
+                    )
+
                 return True, f"成功刪除租客 {tenant_name}"
-        
+
         except Exception as e:
             log_db_operation("UPDATE", "tenants", False, error=str(e))
             logger.error(f"❌ 刪除失敗: {str(e)}", exc_info=True)
             return False, f"刪除失敗: {str(e)[:100]}"
-    
+
     # ==================== 輔助方法 ====================
-    
+
     def check_room_availability(self, room_number: str) -> bool:
         """
         檢查房間是否可用
-        
+
         Args:
             room_number: 房號
-        
+
         Returns:
             bool: True=可用, False=已佔用
         """
@@ -477,72 +615,83 @@ class TenantService(BaseDBService):
                 cursor = conn.cursor()
                 cursor.execute(
                     "SELECT COUNT(*) FROM tenants WHERE room_number = %s AND is_active = true",
-                    (room_number,)
+                    (room_number,),
                 )
-                
+
                 count = cursor.fetchone()[0]
                 is_available = count == 0
-                
-                logger.info(f"🔍 房間 {room_number}: {'可用' if is_available else '已佔用'}")
+
+                logger.info(
+                    f"🔍 房間 {room_number}: {'可用' if is_available else '已佔用'}"
+                )
                 return is_available
-        
+
         except Exception as e:
             logger.error(f"❌ 檢查失敗: {str(e)}", exc_info=True)
             return False
-    
+
     def get_available_rooms(self) -> List[str]:
         """
         取得所有可用房間
-        
+
         Returns:
             可用房間列表
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
-                
-                cursor.execute("""
+
+                cursor.execute(
+                    """
                     SELECT room_number 
                     FROM tenants 
                     WHERE is_active = true
-                """)
-                
+                """
+                )
+
                 occupied_rooms = [row[0] for row in cursor.fetchall()]
-                available_rooms = [room for room in self.all_rooms if room not in occupied_rooms]
-                
-                log_db_operation("SELECT", "tenants (available rooms)", True, len(available_rooms))
+                available_rooms = [
+                    room for room in self.all_rooms if room not in occupied_rooms
+                ]
+
+                log_db_operation(
+                    "SELECT", "tenants (available rooms)", True, len(available_rooms)
+                )
                 logger.info(f"✅ 可用房間: {len(available_rooms)} 間")
                 return available_rooms
-        
+
         except Exception as e:
-            log_db_operation("SELECT", "tenants (available rooms)", False, error=str(e))
+            log_db_operation(
+                "SELECT", "tenants (available rooms)", False, error=str(e)
+            )
             logger.error(f"❌ 查詢失敗: {str(e)}", exc_info=True)
             return []
-    
+
     def get_vacant_rooms(self, all_rooms: Optional[List[str]] = None) -> List[str]:
         """
         取得空房列表（別名方法）
-        
+
         Args:
             all_rooms: 所有房間號碼列表（如果不提供，使用預設房間列表）
-        
+
         Returns:
             空房號碼列表
         """
         return self.get_available_rooms()
-    
+
     def get_tenant_statistics(self) -> Dict:
         """
         取得租客統計數據
-        
+
         Returns:
             統計數據字典
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
-                
-                cursor.execute("""
+
+                cursor.execute(
+                    """
                     SELECT 
                         COUNT(*) as total_tenants,
                         SUM(base_rent) as total_rent,
@@ -550,79 +699,83 @@ class TenantService(BaseDBService):
                         SUM(deposit) as total_deposit
                     FROM tenants
                     WHERE is_active = true
-                """)
-                
+                """
+                )
+
                 row = cursor.fetchone()
-                
+
                 total_tenants = int(row[0] or 0)
                 total_rooms = len(self.all_rooms)
                 available_rooms = total_rooms - total_tenants
-                occupancy_rate = (total_tenants / total_rooms * 100) if total_rooms > 0 else 0
-                
+                occupancy_rate = (
+                    total_tenants / total_rooms * 100 if total_rooms > 0 else 0
+                )
+
                 stats = {
-                    'total_tenants': total_tenants,
-                    'total_rent': float(row[1] or 0),
-                    'avg_rent': float(row[2] or 0),
-                    'total_deposit': float(row[3] or 0),
-                    'occupied_rooms': total_tenants,
-                    'available_rooms': available_rooms,
-                    'total_rooms': total_rooms,
-                    'occupancy_rate': round(occupancy_rate, 2)
+                    "total_tenants": total_tenants,
+                    "total_rent": float(row[1] or 0),
+                    "avg_rent": float(row[2] or 0),
+                    "total_deposit": float(row[3] or 0),
+                    "occupied_rooms": total_tenants,
+                    "available_rooms": available_rooms,
+                    "total_rooms": total_rooms,
+                    "occupancy_rate": round(occupancy_rate, 2),
                 }
-                
+
                 log_db_operation("SELECT", "tenants (statistics)", True, 1)
                 logger.info(f"✅ 統計完成: 出租率 {occupancy_rate:.1f}%")
-                
+
                 return stats
-        
+
         except Exception as e:
             log_db_operation("SELECT", "tenants (statistics)", False, error=str(e))
             logger.error(f"❌ 統計失敗: {str(e)}", exc_info=True)
             return {
-                'total_tenants': 0,
-                'total_rent': 0.0,
-                'avg_rent': 0.0,
-                'total_deposit': 0.0,
-                'occupied_rooms': 0,
-                'available_rooms': len(self.all_rooms),
-                'total_rooms': len(self.all_rooms),
-                'occupancy_rate': 0.0
+                "total_tenants": 0,
+                "total_rent": 0.0,
+                "avg_rent": 0.0,
+                "total_deposit": 0.0,
+                "occupied_rooms": 0,
+                "available_rooms": len(self.all_rooms),
+                "total_rooms": len(self.all_rooms),
+                "occupancy_rate": 0.0,
             }
-    
+
     def get_occupancy_rate(self, total_rooms: Optional[int] = None) -> float:
         """
         計算出租率（別名方法）
-        
+
         Args:
             total_rooms: 總房間數（如果不提供，使用預設房間總數）
-        
+
         Returns:
             出租率（百分比）
         """
         try:
             stats = self.get_tenant_statistics()
-            return stats['occupancy_rate']
-        
+            return stats["occupancy_rate"]
+
         except Exception as e:
             logger.error(f"❌ 計算出租率失敗: {str(e)}", exc_info=True)
             return 0.0
-    
+
     def get_expiring_leases(self, days: int = 30) -> List[Dict]:
         """
         取得即將到期的租約
-        
+
         Args:
             days: 提前天數（預設 30 天）
-        
+
         Returns:
             即將到期的租客列表
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
-                
+
                 # ✅ 使用 make_interval 更安全
-                cursor.execute("""
+                cursor.execute(
+                    """
                     SELECT 
                         id, 
                         room_number, 
@@ -635,28 +788,34 @@ class TenantService(BaseDBService):
                     AND lease_end <= CURRENT_DATE + make_interval(days => %s)
                     AND lease_end >= CURRENT_DATE
                     ORDER BY lease_end
-                """, (days,))
-                
+                """,
+                    (days,),
+                )
+
                 columns = [desc[0] for desc in cursor.description]
                 rows = cursor.fetchall()
-                
-                log_db_operation("SELECT", "tenants (expiring leases)", True, len(rows))
+
+                log_db_operation(
+                    "SELECT", "tenants (expiring leases)", True, len(rows)
+                )
                 logger.info(f"⏰ 找到 {len(rows)} 筆即將到期的租約")
-                
+
                 return [dict(zip(columns, row)) for row in rows]
-        
+
         except Exception as e:
-            log_db_operation("SELECT", "tenants (expiring leases)", False, error=str(e))
+            log_db_operation(
+                "SELECT", "tenants (expiring leases)", False, error=str(e)
+            )
             logger.error(f"❌ 查詢失敗: {str(e)}", exc_info=True)
             return []
-    
+
     def check_lease_expiry(self, days_ahead: int = 45) -> List[Dict]:
         """
         檢查即將到期的租約（別名方法）
-        
+
         Args:
             days_ahead: 提前幾天檢查
-        
+
         Returns:
             即將到期的房客列表
         """
@@ -668,14 +827,14 @@ class TenantService(BaseDBService):
 # ============================================
 if __name__ == "__main__":
     service = TenantService()
-    
+
     print("=== 測試房客服務 ===\n")
-    
+
     # 測試取得所有房客
     print("1. 所有房客 (DataFrame):")
     df = service.get_tenants()
     print(f"   共 {len(df)} 筆房客資料\n")
-    
+
     # 測試取得所有房客 (List)
     print("2. 所有房客 (List):")
     tenants = service.get_all_tenants()
@@ -685,22 +844,25 @@ if __name__ == "__main__":
         print(f"   共 {len(tenants)} 筆\n")
     else:
         print("   無房客資料\n")
-    
+
     # 測試統計
     print("3. 租客統計:")
     stats = service.get_tenant_statistics()
     for key, value in stats.items():
         print(f"   {key}: {value}")
-    
+
     # 測試即將到期
     print("\n4. 即將到期租約 (45天內):")
     expiring = service.check_lease_expiry(45)
     if expiring:
         for lease in expiring:
-            print(f"   {lease['room_number']} - {lease['tenant_name']} (剩餘 {lease['days_remaining']} 天)")
+            print(
+                f"   {lease['room_number']} - {lease['tenant_name']} "
+                f"(剩餘 {lease['days_remaining']} 天)"
+            )
     else:
         print("   無即將到期的租約")
-    
+
     # 測試空房
     print("\n5. 可用房間:")
     vacant = service.get_vacant_rooms()
@@ -708,5 +870,5 @@ if __name__ == "__main__":
         print(f"   {', '.join(vacant)}")
     else:
         print("   無空房")
-    
+
     print("\n✅ 測試完成")
