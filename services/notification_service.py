@@ -1,10 +1,11 @@
 """
-統一通知服務 - v4.1
+統一通知服務 - v4.2
 ✅ 整合 LINE/Email 發送
 ✅ 自動寫入 notification_logs
 ✅ 支援電費、租金、催繳等多種通知類型
 ✅ 完整的錯誤追蹤
 ✅ 系統設定管理 (新增)
+✅ 僅對已驗證的 LINE 綁定 (is_verified) 發送租金 / 電費通知
 """
 
 import os
@@ -340,6 +341,9 @@ class NotificationService(BaseDBService):
         """
         發送電費帳單通知 + 寫入 notification_logs
         
+        僅對 tenant_contacts 中 line_user_id 不為空、notify_electricity = true、
+        且 is_verified = true 的房客發送通知。
+        
         Args:
             period_id: 期間 ID
             remind_date: 催繳開始日期 (可選，默認下月1號)
@@ -379,6 +383,7 @@ class NotificationService(BaseDBService):
                         t.tenant_name,
                         tc.line_user_id,
                         tc.notify_electricity,
+                        COALESCE(tc.is_verified, false) AS is_verified,
                         ep.period_year,
                         ep.period_month_start,
                         ep.period_month_end
@@ -390,6 +395,7 @@ class NotificationService(BaseDBService):
                         AND er.status = 'unpaid'
                         AND tc.line_user_id IS NOT NULL
                         AND tc.notify_electricity = true
+                        AND COALESCE(tc.is_verified, false) = true
                     """,
                     (period_id,)
                 )
@@ -399,11 +405,23 @@ class NotificationService(BaseDBService):
                 failed_count = 0
                 
                 if not records:
-                    logger.info("📭 沒有需要通知的租客")
-                    return True, "📭 沒有需要通知的租客", 0
+                    logger.info("📭 沒有需要通知的租客（無已驗證綁定）")
+                    return True, "📭 沒有需要通知的租客（無已驗證綁定）", 0
                 
                 for record in records:
-                    er_id, room, amount, tenant_id, tenant_name, line_id, _, year, month_start, month_end = record
+                    (
+                        er_id,
+                        room,
+                        amount,
+                        tenant_id,
+                        tenant_name,
+                        line_id,
+                        _notify_elec,
+                        _is_verified,
+                        year,
+                        month_start,
+                        month_end,
+                    ) = record
                     period_text = f"{year}/{month_start}-{month_end}"
                     
                     try:
@@ -560,6 +578,8 @@ class NotificationService(BaseDBService):
         """
         發送租金催繳通知 + 寫入 notification_logs
         
+        僅在 tenant_contacts 有 line_user_id 且 is_verified = true 的情況下發送。
+        
         Args:
             payment_id: 租金排程 ID
             reminder_stage: 催繳階段 (first/second/third/final)
@@ -571,7 +591,7 @@ class NotificationService(BaseDBService):
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
-                # 查詢租金資訊
+                # 查詢租金資訊 + 綁定狀態
                 cursor.execute(
                     """
                     SELECT 
@@ -583,7 +603,8 @@ class NotificationService(BaseDBService):
                         ps.payment_month,
                         t.id as tenant_id,
                         tc.line_user_id,
-                        tc.notify_rent
+                        tc.notify_rent,
+                        COALESCE(tc.is_verified, false) AS is_verified
                     FROM payment_schedule ps
                     LEFT JOIN tenants t ON ps.room_number = t.room_number AND t.is_active = true
                     LEFT JOIN tenant_contacts tc ON t.id = tc.tenant_id
@@ -598,18 +619,37 @@ class NotificationService(BaseDBService):
                     logger.warning(f"⚠️ 租金記錄 {payment_id} 不存在或已繳款")
                     return False, "❌ 未找到租金記錄或已繳款"
                 
-                room, tenant_name, amount, due_date, year, month, tenant_id, line_id, notify_rent = result
+                (
+                    room,
+                    tenant_name,
+                    amount,
+                    due_date,
+                    year,
+                    month,
+                    tenant_id,
+                    line_id,
+                    notify_rent,
+                    is_verified,
+                ) = result
                 
                 if not line_id:
                     logger.warning(f"⚠️ {tenant_name} 未設定 LINE User ID")
                     return False, f"❌ {tenant_name} 未設定 LINE User ID"
+                
+                if not is_verified:
+                    logger.info(f"ℹ️ {tenant_name} 尚未完成 LINE 綁定驗證，略過催繳")
+                    return False, f"ℹ️ {tenant_name} 尚未完成 LINE 綁定驗證"
                 
                 if not notify_rent:
                     logger.info(f"ℹ️ {tenant_name} 已關閉租金通知")
                     return False, f"ℹ️ {tenant_name} 已關閉租金通知"
                 
                 # 計算逾期天數
-                overdue_days = (datetime.now().date() - due_date).days if isinstance(due_date, datetime) else (datetime.now().date() - due_date).days
+                overdue_days = (
+                    (datetime.now().date() - due_date).days
+                    if isinstance(due_date, datetime)
+                    else (datetime.now().date() - due_date).days
+                )
                 
                 # 準備訊息（根據階段）
                 messages = {
@@ -746,7 +786,12 @@ class NotificationService(BaseDBService):
                 
                 if success:
                     success_count += 1
-                elif "已關閉" in msg or "已繳款" in msg:
+                elif (
+                    "已關閉" in msg
+                    or "已繳款" in msg
+                    or "尚未完成 LINE 綁定驗證" in msg
+                ):
+                    # 已關閉通知、已繳款、尚未完成驗證 => 視為跳過
                     skip_count += 1
                 else:
                     fail_count += 1
