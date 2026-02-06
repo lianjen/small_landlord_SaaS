@@ -1,9 +1,10 @@
 """
-智能催繳引擎 - v4.0 Final
+智能催繳引擎 - v4.1
 ✅ 根據租客歷史行為動態調整提醒策略
 ✅ 多階段催繳（溫和→友善→正式→最終）
 ✅ 自動學習和優化
 ✅ 完整的行為追蹤
+✅ 僅對已完成 LINE 綁定驗證 (is_verified) 且開啟租金通知的租客建立催繳任務
 """
 
 import json
@@ -49,7 +50,6 @@ class ReminderService(BaseDBService):
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
-                # ✅ 修正：使用正確的 PostgreSQL 語法
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS tenant_behavior (
                         tenant_id TEXT PRIMARY KEY,
@@ -155,7 +155,7 @@ class ReminderService(BaseDBService):
         if current_date is None:
             current_date = datetime.now()
         
-        # ✅ 修正：統一處理 datetime 和 date 類型
+        # ✅ 統一處理 datetime 和 date 類型
         if isinstance(due_date, datetime):
             due_date_obj = due_date
         else:
@@ -175,17 +175,17 @@ class ReminderService(BaseDBService):
         
         # 判斷邏輯
         if len(optimal_days) >= 1 and days_diff == optimal_days[0] and ReminderStage.FIRST not in sent_stages:
-            logger.info(f"✅ 應發送第一次提醒")
+            logger.info("✅ 應發送第一次提醒")
             return ReminderStage.FIRST
         
         elif len(optimal_days) >= 2 and days_diff <= optimal_days[1] and ReminderStage.SECOND not in sent_stages:
             if ReminderStage.FIRST in sent_stages:  # 必須先發過第一次
-                logger.info(f"✅ 應發送第二次提醒")
+                logger.info("✅ 應發送第二次提醒")
                 return ReminderStage.SECOND
         
         elif len(optimal_days) >= 3 and days_diff <= optimal_days[2] and ReminderStage.THIRD not in sent_stages:
             if ReminderStage.SECOND in sent_stages:
-                logger.info(f"✅ 應發送第三次提醒")
+                logger.info("✅ 應發送第三次提醒")
                 return ReminderStage.THIRD
         
         elif days_diff <= -7 and ReminderStage.FINAL not in sent_stages:
@@ -216,14 +216,18 @@ class ReminderService(BaseDBService):
         Returns:
             催繳訊息文字
         """
-        # ✅ 修正：統一處理日期格式
+        # 統一處理日期格式
         if isinstance(due_date, datetime):
             due_date_str = due_date.strftime('%Y/%m/%d')
         else:
             due_date_str = due_date.strftime('%Y/%m/%d')
         
         # 計算逾期天數
-        overdue_days = (datetime.now().date() - due_date.date() if isinstance(due_date, datetime) else datetime.now().date() - due_date).days
+        overdue_days = (
+            (datetime.now().date() - due_date.date())
+            if isinstance(due_date, datetime)
+            else (datetime.now().date() - due_date)
+        ).days
         
         templates = {
             ReminderStage.FIRST: f"""親愛的 {tenant_name} 您好，
@@ -295,7 +299,7 @@ class ReminderService(BaseDBService):
             bool: 成功/失敗
         """
         try:
-            # ✅ 修正：處理 date 類型
+            # 處理 date 類型
             if isinstance(due_date, datetime):
                 due_date_obj = due_date
             else:
@@ -312,7 +316,7 @@ class ReminderService(BaseDBService):
                     VALUES (%s, %s, %s, %s, %s)
                 """, (tenant_id, rent_month, stage.value, due_date_obj.date(), days_before_due))
                 
-                # ✅ 同時更新 tenant_behavior 的 total_reminders
+                # 同時更新 tenant_behavior 的 total_reminders
                 cursor.execute("""
                     INSERT INTO tenant_behavior (tenant_id, total_reminders)
                     VALUES (%s, 1)
@@ -346,7 +350,7 @@ class ReminderService(BaseDBService):
             paid_date: 繳款日
         """
         try:
-            # ✅ 修正：統一日期處理
+            # 統一日期處理
             if isinstance(due_date, datetime):
                 due_date_obj = due_date.date()
             else:
@@ -518,19 +522,23 @@ class ReminderService(BaseDBService):
             response_score * response_weight
         )
         
-        return int(min(100, max(0, total_score)))  # ✅ 確保範圍 0-100
+        return int(min(100, max(0, total_score)))  # 確保範圍 0-100
     
     # ==================== 批次操作 ====================
     
     def get_tenants_needing_reminder(self, check_date: datetime = None) -> List[Dict]:
         """
-        取得需要催繳的租客列表
+        取得需要催繳的租客列表（僅包含已完成 LINE 綁定驗證且開啟租金通知者）
         
         Args:
             check_date: 檢查日期（可選，默認為今天）
         
         Returns:
-            需要催繳的租客列表
+            需要催繳的租客列表，每筆包含：
+            - payment_id, tenant_id, tenant_name, room_number
+            - amount, due_date, year, month
+            - reminder_stage, message
+            - line_user_id, is_verified, notify_rent
         """
         if check_date is None:
             check_date = datetime.now()
@@ -539,29 +547,53 @@ class ReminderService(BaseDBService):
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
-                # 查詢未繳款的租金記錄
+                # 查詢未繳款的租金記錄 + 已驗證的 LINE 綁定 / 通知偏好
                 cursor.execute("""
                     SELECT 
                         ps.id,
-                        t.id as tenant_id,
+                        t.id AS tenant_id,
                         t.tenant_name,
                         t.room_number,
                         ps.amount,
                         ps.due_date,
                         ps.payment_year,
-                        ps.payment_month
+                        ps.payment_month,
+                        tc.line_user_id,
+                        COALESCE(tc.is_verified, false) AS is_verified,
+                        COALESCE(tc.notify_rent, true) AS notify_rent
                     FROM payment_schedule ps
-                    LEFT JOIN tenants t ON ps.room_number = t.room_number AND t.is_active = true
-                    WHERE ps.status = 'unpaid' 
-                    AND t.id IS NOT NULL
+                    LEFT JOIN tenants t 
+                        ON ps.room_number = t.room_number 
+                       AND t.is_active = true
+                    LEFT JOIN tenant_contacts tc
+                        ON t.id = tc.tenant_id
+                    WHERE ps.status = 'unpaid'
+                      AND t.id IS NOT NULL
+                      AND tc.line_user_id IS NOT NULL
+                      AND COALESCE(tc.is_verified, false) = true
+                      AND COALESCE(tc.notify_rent, true) = true
                     ORDER BY ps.due_date
                 """)
                 
-                tenants = []
-                for row in cursor.fetchall():
-                    payment_id, tenant_id, name, room, amount, due, year, month = row
+                tenants: List[Dict] = []
+                rows = cursor.fetchall()
+                
+                for row in rows:
+                    (
+                        payment_id,
+                        tenant_id,
+                        name,
+                        room,
+                        amount,
+                        due,
+                        year,
+                        month,
+                        line_user_id,
+                        is_verified,
+                        notify_rent,
+                    ) = row
                     
-                    # 檢查是否需要發送提醒
+                    # 檢查是否需要發送提醒（只根據行為檔案與 due_date）
                     stage = self.should_send_reminder(str(tenant_id), due, check_date)
                     
                     if stage:
@@ -575,11 +607,16 @@ class ReminderService(BaseDBService):
                             'year': year,
                             'month': month,
                             'reminder_stage': stage,
-                            'message': self.generate_reminder_message(name, room, float(amount), due, stage)
+                            'message': self.generate_reminder_message(
+                                name, room, float(amount), due, stage
+                            ),
+                            'line_user_id': line_user_id,
+                            'is_verified': bool(is_verified),
+                            'notify_rent': bool(notify_rent),
                         })
                 
                 log_db_operation("SELECT", "tenants_needing_reminder", True, len(tenants))
-                logger.info(f"✅ 找到 {len(tenants)} 位需要催繳的租客")
+                logger.info(f"✅ 找到 {len(tenants)} 位需要催繳的租客（已驗證 LINE 綁定）")
                 return tenants
         
         except Exception as e:
