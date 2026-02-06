@@ -1,11 +1,12 @@
 """
-租客聯絡方式服務 - v1.1
+租客聯絡方式服務 - v1.2
 處理 LINE User ID 綁定、通知偏好設定
-✅ 自動建立 tenant_contacts 表
+✅ 自動建立 tenant_contacts 表（新安裝有 id 欄位）
+✅ 兼容舊 DB（tenant_contacts 無 id 欄位）
 ✅ 綁定/解綁 LINE User ID
 ✅ 更新通知偏好
 ✅ 查詢綁定狀態
-✅ 兼容新的 tenants 資料表欄位 (room_number, tenant_name, is_active, base_rent)
+✅ 對齊 tenants 新欄位 (room_number, tenant_name, is_active, base_rent)
 """
 
 from typing import Tuple, Optional, Dict, List
@@ -24,7 +25,10 @@ class TenantContactService(BaseDBService):
     # ==================== 初始化 ====================
 
     def _init_tables(self) -> None:
-        """初始化 tenant_contacts 表（如果不存在）"""
+        """初始化 tenant_contacts 表（如果不存在）。
+
+        注意：舊安裝可能沒有 id 欄位，本服務會避免依賴 tc.id。
+        """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
@@ -73,9 +77,7 @@ class TenantContactService(BaseDBService):
         notify_rent: bool = True,
         notify_electricity: bool = True,
     ) -> Tuple[bool, str]:
-        """
-        綁定 LINE User ID 到房客
-        """
+        """綁定 LINE User ID 到房客"""
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
@@ -142,9 +144,7 @@ class TenantContactService(BaseDBService):
             return False, f"❌ 綁定失敗: {str(e)[:100]}"
 
     def unbind_line_user(self, tenant_id: int) -> Tuple[bool, str]:
-        """
-        解除 LINE 綁定
-        """
+        """解除 LINE 綁定"""
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
@@ -187,17 +187,15 @@ class TenantContactService(BaseDBService):
     # ==================== 查詢功能 ====================
 
     def get_tenant_contact(self, tenant_id: int) -> Optional[Dict]:
-        """
-        取得房客聯絡資訊
-        """
+        """取得房客聯絡資訊（兼容無 id 欄位的舊 tenant_contacts）"""
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
+                # 不選 tc.id，避免舊表沒有此欄位
                 cursor.execute(
                     """
                     SELECT
-                        tc.id,
                         tc.tenant_id,
                         tc.line_user_id,
                         tc.notify_rent,
@@ -229,7 +227,6 @@ class TenantContactService(BaseDBService):
 
                     if tenant:
                         return {
-                            "id": None,
                             "tenant_id": tenant_id,
                             "line_user_id": None,
                             "notify_rent": True,
@@ -243,15 +240,14 @@ class TenantContactService(BaseDBService):
                     return None
 
                 return {
-                    "id": row[0],
-                    "tenant_id": row[1],
-                    "line_user_id": row[2],
-                    "notify_rent": row[3],
-                    "notify_electricity": row[4],
-                    "created_at": row[5],
-                    "updated_at": row[6],
-                    "tenant_name": row[7],
-                    "room_number": row[8],
+                    "tenant_id": row[0],
+                    "line_user_id": row[1],
+                    "notify_rent": row[2],
+                    "notify_electricity": row[3],
+                    "created_at": row[4],
+                    "updated_at": row[5],
+                    "tenant_name": row[6],
+                    "room_number": row[7],
                 }
 
         except Exception as e:
@@ -259,9 +255,7 @@ class TenantContactService(BaseDBService):
             return None
 
     def get_tenant_by_line_id(self, line_user_id: str) -> Optional[Dict]:
-        """
-        根據 LINE User ID 查詢房客
-        """
+        """根據 LINE User ID 查詢房客"""
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
@@ -305,9 +299,7 @@ class TenantContactService(BaseDBService):
             return None
 
     def get_all_line_bindings(self) -> List[Dict]:
-        """
-        取得所有 LINE 綁定記錄
-        """
+        """取得所有 LINE 綁定記錄（不依賴 tc.id）"""
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
@@ -315,7 +307,6 @@ class TenantContactService(BaseDBService):
                 cursor.execute(
                     """
                     SELECT
-                        tc.id,
                         tc.tenant_id,
                         tc.line_user_id,
                         tc.notify_rent,
@@ -334,14 +325,13 @@ class TenantContactService(BaseDBService):
                 for row in cursor.fetchall():
                     results.append(
                         {
-                            "id": row[0],
-                            "tenant_id": row[1],
-                            "line_user_id": row[2],
-                            "notify_rent": row[3],
-                            "notify_electricity": row[4],
-                            "room_number": row[5],
-                            "tenant_name": row[6],
-                            "phone": row[7],
+                            "tenant_id": row[0],
+                            "line_user_id": row[1],
+                            "notify_rent": row[2],
+                            "notify_electricity": row[3],
+                            "room_number": row[4],
+                            "tenant_name": row[5],
+                            "phone": row[6],
                         }
                     )
 
@@ -360,9 +350,7 @@ class TenantContactService(BaseDBService):
         notify_rent: Optional[bool] = None,
         notify_electricity: Optional[bool] = None,
     ) -> Tuple[bool, str]:
-        """
-        更新通知偏好設定
-        """
+        """更新通知偏好設定"""
         try:
             updates: List[str] = []
             params: List[object] = []
@@ -385,7 +373,7 @@ class TenantContactService(BaseDBService):
                 cursor = conn.cursor()
 
                 cursor.execute(
-                    "SELECT id FROM tenant_contacts WHERE tenant_id = %s",
+                    "SELECT tenant_id FROM tenant_contacts WHERE tenant_id = %s",
                     (tenant_id,),
                 )
 
@@ -422,9 +410,7 @@ class TenantContactService(BaseDBService):
     # ==================== 統計功能 ====================
 
     def get_binding_statistics(self) -> Dict:
-        """
-        取得 LINE 綁定統計資料
-        """
+        """取得 LINE 綁定統計資料"""
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
