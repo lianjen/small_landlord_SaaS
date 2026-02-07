@@ -1,5 +1,5 @@
 """
-租客管理服務 - v3.1
+租客管理服務 - v3.2 (Supabase Compatible)
 ✅ 租客 CRUD 操作
 ✅ 房間佔用檢查
 ✅ 常量驗證
@@ -7,9 +7,8 @@
 ✅ 與其他模組兼容
 ✅ SQL 注入防護
 ✅ DataFrame 安全處理
-✅ 與 tenant_contacts 整合：
-   - 更新房號時同步更新 tenant_contacts.room_number
-   - 刪除租客時清空 tenant_contacts 綁定狀態
+✅ 與 tenant_contacts 整合
+✅ 完全適配 Supabase (name 欄位)
 """
 
 import pandas as pd
@@ -30,18 +29,8 @@ except ImportError:
     class BackupConstants:
         class ROOMS:
             ALL_ROOMS = [
-                "1A",
-                "1B",
-                "2A",
-                "2B",
-                "3A",
-                "3B",
-                "3C",
-                "3D",
-                "4A",
-                "4B",
-                "4C",
-                "4D",
+                "1A", "1B", "2A", "2B", "3A", "3B", "3C", "3D",
+                "4A", "4B", "4C", "4D",
             ]
 
         class PAYMENT:
@@ -76,13 +65,15 @@ class TenantService(BaseDBService):
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
-                condition = "WHERE is_active = true" if active_only else ""
+                condition = "WHERE status = 'active'" if active_only else ""
+                
+                # ✅ 修正：tenant_name → name
                 cursor.execute(
                     f"""
-                    SELECT id, room_number, tenant_name, phone, deposit, base_rent,
-                           lease_start, lease_end, payment_method, has_water_fee,
+                    SELECT id, room_number, name, phone, deposit_amount, rent_amount,
+                           move_in_date, move_out_date, payment_method, has_water_fee,
                            annual_discount_months, discount_notes, last_ac_cleaning_date,
-                           is_active, created_at
+                           status, created_at
                     FROM tenants
                     {condition}
                     ORDER BY room_number
@@ -115,7 +106,6 @@ class TenantService(BaseDBService):
         try:
             df = self.get_tenants(active_only=not include_inactive)
 
-            # ✅ 確保 df 是 DataFrame
             if not isinstance(df, pd.DataFrame):
                 logger.error(f"❌ 回傳類型錯誤: 期望 DataFrame，實際 {type(df)}")
                 return []
@@ -167,7 +157,7 @@ class TenantService(BaseDBService):
         根據 ID 查詢租客
 
         Args:
-            tenant_id: 租客 ID
+            tenant_id: 租客 ID (UUID)
 
         Returns:
             租客資訊字典，如果不存在返回 None
@@ -176,11 +166,12 @@ class TenantService(BaseDBService):
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
+                # ✅ 修正：tenant_name → name
                 cursor.execute(
                     """
-                    SELECT id, room_number, tenant_name, phone, deposit, base_rent,
-                           lease_start, lease_end, payment_method, has_water_fee,
-                           annual_discount_months, discount_notes, is_active
+                    SELECT id, room_number, name, phone, deposit_amount, rent_amount,
+                           move_in_date, move_out_date, payment_method, has_water_fee,
+                           annual_discount_months, discount_notes, status
                     FROM tenants
                     WHERE id = %s
                 """,
@@ -216,13 +207,14 @@ class TenantService(BaseDBService):
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
+                # ✅ 修正：tenant_name → name，is_active → status
                 cursor.execute(
                     """
-                    SELECT id, room_number, tenant_name, phone, deposit, base_rent,
-                           lease_start, lease_end, payment_method, has_water_fee,
-                           annual_discount_months, discount_notes, is_active
+                    SELECT id, room_number, name, phone, deposit_amount, rent_amount,
+                           move_in_date, move_out_date, payment_method, has_water_fee,
+                           annual_discount_months, discount_notes, status
                     FROM tenants
-                    WHERE room_number = %s AND is_active = true
+                    WHERE room_number = %s AND status = 'active'
                 """,
                     (room_number,),
                 )
@@ -257,6 +249,7 @@ class TenantService(BaseDBService):
         has_water_fee: bool = False,
         annual_discount_months: int = 0,
         discount_notes: str = "",
+        user_id: str = None,  # ✅ 新增：Supabase user_id
     ) -> Tuple[bool, str]:
         """
         新增租客
@@ -273,11 +266,17 @@ class TenantService(BaseDBService):
             has_water_fee: 是否包含水費
             annual_discount_months: 年度折扣月數
             discount_notes: 折扣備註
+            user_id: Supabase 用戶 ID (必填)
 
         Returns:
             (bool, str): 成功/失敗訊息
         """
         try:
+            # ✅ 驗證 user_id
+            if not user_id:
+                logger.error("❌ 缺少 user_id")
+                return False, "缺少用戶 ID"
+
             # 驗證房號
             if room not in self.all_rooms:
                 logger.warning(f"❌ 房號無效: {room}")
@@ -298,7 +297,7 @@ class TenantService(BaseDBService):
 
                 # 檢查房間是否已被佔用
                 cursor.execute(
-                    "SELECT COUNT(*) FROM tenants WHERE room_number = %s AND is_active = true",
+                    "SELECT COUNT(*) FROM tenants WHERE room_number = %s AND status = 'active'",
                     (room,),
                 )
 
@@ -306,15 +305,17 @@ class TenantService(BaseDBService):
                     logger.warning(f"❌ 房間已被佔用: {room}")
                     return False, f"房間 {room} 已有租客"
 
-                # 插入租客
+                # ✅ 插入租客（適配 Supabase 欄位）
                 cursor.execute(
                     """
                     INSERT INTO tenants 
-                    (room_number, tenant_name, phone, deposit, base_rent, lease_start, 
-                     lease_end, payment_method, has_water_fee, annual_discount_months, discount_notes)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    (user_id, room_number, name, phone, deposit_amount, rent_amount, 
+                     move_in_date, move_out_date, payment_method, has_water_fee, 
+                     annual_discount_months, discount_notes, status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active')
                 """,
                     (
+                        user_id,
                         room,
                         name,
                         phone,
@@ -329,6 +330,7 @@ class TenantService(BaseDBService):
                     ),
                 )
 
+                conn.commit()
                 log_db_operation("INSERT", "tenants", True, 1)
                 logger.info(f"✅ 新增租客: {name} ({room})")
                 return True, f"成功新增租客 {name}"
@@ -338,35 +340,35 @@ class TenantService(BaseDBService):
             logger.error(f"❌ 新增失敗: {str(e)}", exc_info=True)
             return False, f"新增失敗: {str(e)[:100]}"
 
-    def create_tenant(self, tenant_data: Dict) -> Optional[int]:
+    def create_tenant(self, tenant_data: Dict) -> Optional[str]:
         """
-        新增房客（別名方法，返回 ID）
+        新增房客（別名方法，返回 UUID）
 
         Args:
             tenant_data: 房客資料字典
 
         Returns:
-            新增房客的 ID，失敗返回 None
+            新增房客的 UUID，失敗返回 None
         """
         try:
+            # ✅ 修正：tenant_name → name
             success, msg = self.add_tenant(
                 room=tenant_data["room_number"],
-                name=tenant_data["tenant_name"],
+                name=tenant_data["name"],  # ✅ 改這裡
                 phone=tenant_data.get("phone", ""),
-                deposit=tenant_data["deposit"],
-                base_rent=tenant_data["base_rent"],
-                start=tenant_data["lease_start"],
-                end=tenant_data["lease_end"],
+                deposit=tenant_data["deposit_amount"],  # ✅ Supabase 欄位名
+                base_rent=tenant_data["rent_amount"],   # ✅ Supabase 欄位名
+                start=tenant_data["move_in_date"],      # ✅ Supabase 欄位名
+                end=tenant_data["move_out_date"],       # ✅ Supabase 欄位名
                 payment_method=tenant_data["payment_method"],
                 has_water_fee=tenant_data.get("has_water_fee", False),
-                annual_discount_months=tenant_data.get(
-                    "annual_discount_months", 0
-                ),
+                annual_discount_months=tenant_data.get("annual_discount_months", 0),
                 discount_notes=tenant_data.get("discount_notes", ""),
+                user_id=tenant_data.get("user_id"),  # ✅ 必須提供
             )
 
             if success:
-                # 取得剛新增的租客 ID
+                # 取得剛新增的租客 UUID
                 tenant = self.get_tenant_by_room(tenant_data["room_number"])
                 return tenant["id"] if tenant else None
 
@@ -380,7 +382,7 @@ class TenantService(BaseDBService):
 
     def update_tenant(
         self,
-        tenant_id: int,
+        tenant_id: str,  # ✅ UUID 字串
         room: str = None,
         name: str = None,
         phone: str = None,
@@ -401,7 +403,7 @@ class TenantService(BaseDBService):
         方式2：使用 tenant_data 字典
 
         Args:
-            tenant_id: 租客 ID
+            tenant_id: 租客 UUID
             其他參數: 要更新的欄位（可選）
             tenant_data: 包含所有更新欄位的字典（可選）
 
@@ -412,33 +414,29 @@ class TenantService(BaseDBService):
             # 如果提供了 tenant_data，從中提取參數
             if tenant_data:
                 room = tenant_data.get("room_number", room)
-                name = tenant_data.get("tenant_name", name)
+                name = tenant_data.get("name", name)  # ✅ 改這裡
                 phone = tenant_data.get("phone", phone)
-                deposit = tenant_data.get("deposit", deposit)
-                base_rent = tenant_data.get("base_rent", base_rent)
-                start = tenant_data.get("lease_start", start)
-                end = tenant_data.get("lease_end", end)
+                deposit = tenant_data.get("deposit_amount", deposit)
+                base_rent = tenant_data.get("rent_amount", base_rent)
+                start = tenant_data.get("move_in_date", start)
+                end = tenant_data.get("move_out_date", end)
                 payment_method = tenant_data.get("payment_method", payment_method)
                 has_water_fee = tenant_data.get("has_water_fee", has_water_fee)
                 annual_discount_months = tenant_data.get(
                     "annual_discount_months", annual_discount_months
                 )
-                discount_notes = tenant_data.get(
-                    "discount_notes", discount_notes
-                )
+                discount_notes = tenant_data.get("discount_notes", discount_notes)
 
             # 驗證必要欄位
-            if not all(
-                [
-                    room,
-                    name,
-                    deposit is not None,
-                    base_rent is not None,
-                    start,
-                    end,
-                    payment_method,
-                ]
-            ):
+            if not all([
+                room,
+                name,
+                deposit is not None,
+                base_rent is not None,
+                start,
+                end,
+                payment_method,
+            ]):
                 return False, "缺少必要欄位"
 
             # 驗證房號和付款方式
@@ -465,13 +463,21 @@ class TenantService(BaseDBService):
 
                 old_room = row[0]
 
-                # 更新 tenants 資料
+                # ✅ 更新 tenants 資料（適配 Supabase）
                 cursor.execute(
                     """
                     UPDATE tenants SET
-                        room_number = %s, tenant_name = %s, phone = %s, deposit = %s,
-                        base_rent = %s, lease_start = %s, lease_end = %s, payment_method = %s,
-                        has_water_fee = %s, annual_discount_months = %s, discount_notes = %s,
+                        room_number = %s, 
+                        name = %s, 
+                        phone = %s, 
+                        deposit_amount = %s,
+                        rent_amount = %s, 
+                        move_in_date = %s, 
+                        move_out_date = %s, 
+                        payment_method = %s,
+                        has_water_fee = %s, 
+                        annual_discount_months = %s, 
+                        discount_notes = %s,
                         updated_at = NOW()
                     WHERE id = %s
                 """,
@@ -491,10 +497,11 @@ class TenantService(BaseDBService):
                     ),
                 )
 
+                conn.commit()
                 log_db_operation("UPDATE", "tenants", True, 1)
                 logger.info(f"✅ 更新租客 ID: {tenant_id}")
 
-                # 若房號有變更，順便同步更新 tenant_contacts.room_number
+                # 若房號有變更，同步更新 tenant_contacts.room_number
                 if old_room != room:
                     cursor.execute(
                         """
@@ -520,20 +527,16 @@ class TenantService(BaseDBService):
 
     # ==================== 刪除操作 ====================
 
-    def delete_tenant(self, tenant_id: int) -> Tuple[bool, str]:
+    def delete_tenant(self, tenant_id: str) -> Tuple[bool, str]:
         """
         刪除租客（軟刪除）
 
         行為：
-        - tenants.is_active = false
-        - 同步清理 tenant_contacts 中的綁定資訊：
-            line_user_id = NULL
-            is_verified = false
-            room_number = NULL
-            pending_room / verification_code / verification_expires_at = NULL
+        - tenants.status = 'inactive'
+        - 同步清理 tenant_contacts 中的綁定資訊
 
         Args:
-            tenant_id: 租客 ID
+            tenant_id: 租客 UUID
 
         Returns:
             (bool, str): 成功/失敗訊息
@@ -544,7 +547,7 @@ class TenantService(BaseDBService):
 
                 # 檢查租客是否存在
                 cursor.execute(
-                    "SELECT tenant_name FROM tenants WHERE id = %s",
+                    "SELECT name FROM tenants WHERE id = %s",  # ✅ 改這裡
                     (tenant_id,),
                 )
                 row = cursor.fetchone()
@@ -554,42 +557,46 @@ class TenantService(BaseDBService):
 
                 tenant_name = row[0]
 
-                # 軟刪除 tenants
+                # ✅ 軟刪除（改用 status）
                 cursor.execute(
                     """
                     UPDATE tenants
-                    SET is_active = false,
+                    SET status = 'inactive',
+                        move_out_date = CURRENT_DATE,
                         updated_at = NOW()
                     WHERE id = %s
                     """,
                     (tenant_id,),
                 )
 
+                conn.commit()
                 log_db_operation("UPDATE", "tenants (soft delete)", True, 1)
-                logger.info(
-                    f"✅ 刪除租客 ID: {tenant_id} ({tenant_name})"
-                )
+                logger.info(f"✅ 刪除租客 ID: {tenant_id} ({tenant_name})")
 
-                # 同步清理 tenant_contacts 綁定狀態
-                cursor.execute(
-                    """
-                    UPDATE tenant_contacts
-                    SET
-                        line_user_id = NULL,
-                        is_verified = false,
-                        room_number = NULL,
-                        pending_room = NULL,
-                        verification_code = NULL,
-                        verification_expires_at = NULL,
-                        updated_at = NOW()
-                    WHERE tenant_id = %s
-                    """,
-                    (tenant_id,),
-                )
-                if cursor.rowcount > 0:
-                    logger.info(
-                        f"🔄 已清理 tenant_contacts 綁定狀態 (tenant_id={tenant_id})"
+                # 同步清理 tenant_contacts 綁定狀態（如果表存在）
+                try:
+                    cursor.execute(
+                        """
+                        UPDATE tenant_contacts
+                        SET
+                            line_user_id = NULL,
+                            is_verified = false,
+                            room_number = NULL,
+                            pending_room = NULL,
+                            verification_code = NULL,
+                            verification_expires_at = NULL,
+                            updated_at = NOW()
+                        WHERE tenant_id = %s
+                        """,
+                        (tenant_id,),
                     )
+                    if cursor.rowcount > 0:
+                        logger.info(
+                            f"🔄 已清理 tenant_contacts 綁定狀態 (tenant_id={tenant_id})"
+                        )
+                except Exception:
+                    # tenant_contacts 表可能不存在，忽略錯誤
+                    pass
 
                 return True, f"成功刪除租客 {tenant_name}"
 
@@ -614,7 +621,7 @@ class TenantService(BaseDBService):
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT COUNT(*) FROM tenants WHERE room_number = %s AND is_active = true",
+                    "SELECT COUNT(*) FROM tenants WHERE room_number = %s AND status = 'active'",
                     (room_number,),
                 )
 
@@ -645,7 +652,7 @@ class TenantService(BaseDBService):
                     """
                     SELECT room_number 
                     FROM tenants 
-                    WHERE is_active = true
+                    WHERE status = 'active'
                 """
                 )
 
@@ -690,15 +697,16 @@ class TenantService(BaseDBService):
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
+                # ✅ 適配 Supabase 欄位
                 cursor.execute(
                     """
                     SELECT 
                         COUNT(*) as total_tenants,
-                        SUM(base_rent) as total_rent,
-                        AVG(base_rent) as avg_rent,
-                        SUM(deposit) as total_deposit
+                        SUM(rent_amount) as total_rent,
+                        AVG(rent_amount) as avg_rent,
+                        SUM(deposit_amount) as total_deposit
                     FROM tenants
-                    WHERE is_active = true
+                    WHERE status = 'active'
                 """
                 )
 
@@ -773,21 +781,21 @@ class TenantService(BaseDBService):
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
-                # ✅ 使用 make_interval 更安全
+                # ✅ 適配 Supabase 欄位
                 cursor.execute(
                     """
                     SELECT 
                         id, 
                         room_number, 
-                        tenant_name, 
+                        name, 
                         phone, 
-                        lease_end,
-                        (lease_end - CURRENT_DATE) as days_remaining
+                        move_out_date,
+                        (move_out_date - CURRENT_DATE) as days_remaining
                     FROM tenants
-                    WHERE is_active = true 
-                    AND lease_end <= CURRENT_DATE + make_interval(days => %s)
-                    AND lease_end >= CURRENT_DATE
-                    ORDER BY lease_end
+                    WHERE status = 'active' 
+                    AND move_out_date <= CURRENT_DATE + make_interval(days => %s)
+                    AND move_out_date >= CURRENT_DATE
+                    ORDER BY move_out_date
                 """,
                     (days,),
                 )
@@ -828,7 +836,7 @@ class TenantService(BaseDBService):
 if __name__ == "__main__":
     service = TenantService()
 
-    print("=== 測試房客服務 ===\n")
+    print("=== 測試房客服務 (Supabase Edition) ===\n")
 
     # 測試取得所有房客
     print("1. 所有房客 (DataFrame):")
@@ -840,7 +848,7 @@ if __name__ == "__main__":
     tenants = service.get_all_tenants()
     if tenants:
         for tenant in tenants[:3]:
-            print(f"   {tenant['room_number']} - {tenant['tenant_name']}")
+            print(f"   {tenant['room_number']} - {tenant['name']}")  # ✅ 改這裡
         print(f"   共 {len(tenants)} 筆\n")
     else:
         print("   無房客資料\n")
@@ -857,7 +865,7 @@ if __name__ == "__main__":
     if expiring:
         for lease in expiring:
             print(
-                f"   {lease['room_number']} - {lease['tenant_name']} "
+                f"   {lease['room_number']} - {lease['name']} "  # ✅ 改這裡
                 f"(剩餘 {lease['days_remaining']} 天)"
             )
     else:
