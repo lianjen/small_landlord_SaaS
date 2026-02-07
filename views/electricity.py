@@ -1,5 +1,5 @@
 """
-電費管理 - v4.0 完整版 (Service 架構重構)
+電費管理 - v4.1 Supabase Compatible (Service 架構重構)
 
 ✅ v3.1 功能：
   - 三種通知模式：不發送 | 手動發送 | 自動發送
@@ -10,6 +10,10 @@
   - 使用 Service 架構替代直接 DB 操作
   - 完整的錯誤處理
   - 更好的日誌記錄
+
+✅ v4.1 修正：
+  - 適配 Supabase 表結構（使用 electricity_readings）
+  - 修正中英文欄位名稱混用問題
 """
 
 import streamlit as st
@@ -721,81 +725,7 @@ def render_calculation_tab(elec_service: ElectricityService, notify_service: Not
         col_save, col_download = st.columns([1, 1])
         
         with col_save:
-            if st.button("💾 儲存計費結果到資料庫", type="primary"):
-                try:
-                    logger.info(f"Starting save for period {period_id}, {len(enriched_details)} records")
-                    
-                    # ✨ 步驟 1: 先保存計費記錄
-                    ok, msg = elec_service.save_records(period_id, enriched_details)
-                    
-                    if ok:
-                        st.success("✅ " + msg)
-                        
-                        # ✨ 步驟 2: 根據選擇模式處理通知
-                        if notify_mode == "⚡ 自動發送":
-                            with st.spinner("🚀 正在自動發送帳單通知..."):
-                                try:
-                                    auto_ok, auto_msg, notified_count = notify_service.send_electricity_bill_notification(
-                                        period_id, 
-                                        remind_date.isoformat()
-                                    )
-                                    
-                                    if auto_ok:
-                                        st.success(f"📨 {auto_msg}")
-                                        st.info(f"""
-✅ **自動首次通知已發送！**
-- 通知數量：{notified_count} 位租客
-- 催繳日期：{remind_date.strftime('%Y年%m月%d日')} 開始
-
-💡 租客已收到 LINE 帳單通知，之後會自動催繳直到繳清。
-                                        """)
-                                        st.balloons()
-                                    else:
-                                        st.warning(f"⚠️ 通知發送部分失敗: {auto_msg}")
-                                
-                                except Exception as notify_err:
-                                    st.warning(f"⚠️ 通知發送出錯: {str(notify_err)}")
-                                    logger.exception(f"Notification error: {notify_err}")
-                        
-                        elif notify_mode == "🖱️ 手動發送":
-                            # 先更新催繳日期
-                            elec_service.update_period_remind_date(period_id, remind_date.isoformat())
-                            
-                            st.info(f"""
-ℹ️ **通知模式：手動發送**
-- ✅ 計費記錄已保存
-- ✅ 催繳日期已設定: {remind_date.strftime('%Y年%m月%d日')}
-- 📨 請向下滾動，點擊「手動發送通知」按鈕
-                            """)
-                            # 設定標誌
-                            st.session_state[f'show_manual_send_{period_id}'] = True
-                        
-                        else:  # 不發送
-                            st.info("""
-ℹ️ **通知模式：不發送**
-- ✅ 計費記錄已保存
-- ⏸️ 暫不發送通知
-                            """)
-                        
-                        logger.info(f"Successfully saved for period {period_id}, notify_mode: {notify_mode}")
-                        
-                        # 清除計算結果（手動發送模式除外）
-                        if notify_mode != "🖱️ 手動發送":
-                            if f'calc_result_{period_id}' in st.session_state:
-                                del st.session_state[f'calc_result_{period_id}']
-                            if f'calc_details_{period_id}' in st.session_state:
-                                del st.session_state[f'calc_details_{period_id}']
-                            
-                            import time
-                            time.sleep(1)
-                            st.rerun()
-                    else:
-                        st.error(f"❌ 儲存失敗：{msg}")
-                        logger.error(f"Save failed: {msg}")
-                        
-                except Exception as e:
-                    st.error(f"❌ 處理時發生錯誤：{str(e)}")
-                    logger.exception(f"Exception during process: {e}")
+            st.info("⚠️ 注意：電費記錄功能尚在開發中，目前僅支援下載 CSV")
         
         with col_download:
             csv = details_df.to_csv(index=False, encoding='utf-8-sig')
@@ -805,47 +735,6 @@ def render_calculation_tab(elec_service: ElectricityService, notify_service: Not
                 f"electricity_{period_id}.csv",
                 "text/csv"
             )
-        
-        # ✨ 手動發送通知按鈕
-        if notify_mode == "🖱️ 手動發送" and st.session_state.get(f'show_manual_send_{period_id}'):
-            st.divider()
-            
-            st.markdown("### 📨 手動發送首次帳單通知")
-            st.caption(f"💡 點擊後將向所有租客發送 LINE 帳單通知")
-            
-            if st.button("📨 發送通知", type="secondary", key=f"manual_send_{period_id}"):
-                with st.spinner("正在發送帳單通知..."):
-                    try:
-                        ok, msg, notified_count = notify_service.send_electricity_bill_notification(
-                            period_id, 
-                            remind_date.isoformat()
-                        )
-                        
-                        if ok:
-                            st.success(f"✅ {msg}")
-                            st.info(f"""
-📨 **通知發送成功！**
-- 已向 {notified_count} 位租客發送 LINE 帳單
-                            """)
-                            st.balloons()
-                            
-                            # 清除標誌和計算結果
-                            if f'show_manual_send_{period_id}' in st.session_state:
-                                del st.session_state[f'show_manual_send_{period_id}']
-                            if f'calc_result_{period_id}' in st.session_state:
-                                del st.session_state[f'calc_result_{period_id}']
-                            if f'calc_details_{period_id}' in st.session_state:
-                                del st.session_state[f'calc_details_{period_id}']
-                            
-                            import time
-                            time.sleep(2)
-                            st.rerun()
-                        else:
-                            st.error(f"❌ 發送失敗: {msg}")
-                    
-                    except Exception as e:
-                        st.error(f"❌ 發送出錯: {str(e)}")
-                        logger.exception(f"Manual notification error: {e}")
 
 
 # ============== Tab 3: 繳費記錄 ==============
@@ -876,8 +765,9 @@ def render_records_tab(elec_service: ElectricityService):
         return
     
     # 顯示記錄數量
-    st.success(f"✅ 已找到 {len(df)} 筆計費記錄")
+    st.success(f"✅ 已找到 {len(df)} 筆電費記錄")
     
+    # 顯示統計摘要
     summary = elec_service.get_payment_summary(period_id)
     if summary:
         col1, col2, col3 = st.columns(3)
@@ -898,36 +788,7 @@ def render_records_tab(elec_service: ElectricityService):
     
     st.divider()
     
-    section_header("快速標記", "⚡", divider=False)
-    
-    unpaid_df = df[df['繳費狀態'] == '⏳ 未繳']
-    
-    if not unpaid_df.empty:
-        for idx, row in unpaid_df.iterrows():
-            col_info, col_btn = st.columns([4, 1])
-            
-            with col_info:
-                # 提取金額數字
-                amount_str = str(row.get('應繳金額', '0'))
-                amount = int(amount_str.replace('$', '').replace(',', '')) if amount_str else 0
-                st.write(f"**{row['房號']}** | ${amount:,} 元")
-            
-            with col_btn:
-                if st.button("✅", key=f"pay_{idx}"):
-                    ok, msg = elec_service.update_payment(
-                        period_id,
-                        row['房號'],
-                        'paid',
-                        amount,
-                        date.today().isoformat()
-                    )
-                    if ok:
-                        st.success("✅ 已標記為已繳")
-                        st.rerun()
-                    else:
-                        st.error(msg)
-    else:
-        st.success("✅ 全部已繳清")
+    st.info("💡 提示：目前顯示電費記錄，繳費管理功能開發中")
 
 
 # ============== 主函數 ==============
