@@ -1,5 +1,5 @@
 """
-電費管理 - v4.1 Supabase Compatible (Service 架構重構)
+電費管理 - v4.2 Supabase Compatible (Service 架構重構)
 
 ✅ v3.1 功能：
   - 三種通知模式：不發送 | 手動發送 | 自動發送
@@ -14,6 +14,10 @@
 ✅ v4.1 修正：
   - 適配 Supabase 表結構（使用 electricity_readings）
   - 修正中英文欄位名稱混用問題
+
+✅ v4.2 修正：
+  - 計算後自動儲存完整計費資訊到資料庫
+  - 確保「計算電費」與「繳費記錄」數據一致
 """
 
 import streamlit as st
@@ -557,7 +561,7 @@ def render_calculation_tab(elec_service: ElectricityService, notify_service: Not
         
         st.divider()
     
-    # 儲存讀數
+    # 儲存讀數（僅基本資訊）
     if st.button("💾 儲存讀數", type="primary"):
         if 'room_readings' not in st.session_state:
             st.session_state.room_readings = {}
@@ -567,17 +571,8 @@ def render_calculation_tab(elec_service: ElectricityService, notify_service: Not
         st.session_state.room_readings[period_id] = room_readings
         st.session_state.raw_readings[period_id] = raw_readings
         
-        save_count = 0
-        for room, usage in room_readings.items():
-            raw = raw_readings[room]
-            ok, msg = elec_service.save_reading(
-                period_id, room, raw['previous'], raw['current'], usage
-            )
-            if ok:
-                save_count += 1
-        
-        st.success(f"✅ 已儲存 {save_count} 筆讀數到資料庫")
-        logger.info(f"Saved {save_count} meter readings for period {period_id}")
+        st.success(f"✅ 已儲存讀數到記憶體（請繼續計算）")
+        logger.info(f"Saved readings to session for period {period_id}")
     
     st.divider()
     
@@ -605,20 +600,39 @@ def render_calculation_tab(elec_service: ElectricityService, notify_service: Not
             st.error("❌ 計算失敗")
             return
         
-        # 儲存計算結果到 session_state
+        # ✅ v4.2 關鍵修正：計算完成後立即儲存到資料庫
         enriched_details = []
-        for detail in result['details']:
-            room = detail['房號']
-            detail['previous_reading'] = raw[room]['previous']
-            detail['current_reading'] = raw[room]['current']
-            enriched_details.append(detail)
+        save_count = 0
         
-        # 儲存到 session_state
+        with st.spinner("💾 正在儲存計費資訊到資料庫..."):
+            for detail in result['details']:
+                room = detail['房號']
+                detail['previous_reading'] = raw[room]['previous']
+                detail['current_reading'] = raw[room]['current']
+                enriched_details.append(detail)
+                
+                # 立即儲存完整計費資訊
+                ok, msg = elec_service.save_reading(
+                    period_id=period_id,
+                    room=room,
+                    previous=raw[room]['previous'],
+                    current=raw[room]['current'],
+                    kwh_used=detail['使用度數'],
+                    unit_price=detail['單價'],
+                    public_share_kwh=detail['公用分攤'],
+                    amount_due=detail['應繳金額'],
+                    room_type=detail['類型']
+                )
+                
+                if ok:
+                    save_count += 1
+        
+        # 儲存到 session_state（用於顯示）
         st.session_state[f'calc_result_{period_id}'] = result
         st.session_state[f'calc_details_{period_id}'] = enriched_details
         
-        logger.info(f"Calculated electricity for period {period_id}: {len(enriched_details)} rooms")
-        st.success("✅ 計算完成！結果已生成")
+        logger.info(f"Calculated and saved {save_count} records for period {period_id}")
+        st.success(f"✅ 計算完成！已自動儲存 {save_count} 筆計費記錄到資料庫")
         st.rerun()
     
     # 顯示計算結果（從 session_state 讀取）
@@ -684,57 +698,18 @@ def render_calculation_tab(elec_service: ElectricityService, notify_service: Not
         
         data_table(details_df, key="calc_details")
         
-        # ===== ✨ v4.0 儲存 & 通知設定 =====
         st.divider()
         
-        # 通知模式選擇
-        st.markdown("### 📨 儲存 & 通知設定")
+        # 下載按鈕
+        csv = details_df.to_csv(index=False, encoding='utf-8-sig')
+        st.download_button(
+            "📥 下載 CSV 備份",
+            csv,
+            f"electricity_{period_id}.csv",
+            "text/csv"
+        )
         
-        col_mode, col_date = st.columns([2, 2])
-        
-        with col_mode:
-            notify_mode = st.radio(
-                "📢 選擇通知方式",
-                options=["🚫 不發送", "🖱️ 手動發送", "⚡ 自動發送"],
-                horizontal=True,
-                help="""
-**🚫 不發送**: 只儲存計費記錄，不發送通知
-**🖱️ 手動發送**: 儲存後手動按按鈕發送
-**⚡ 自動發送**: 儲存同時自動發送（推薦）
-                """,
-                key=f"notify_mode_{period_id}"
-            )
-        
-        with col_date:
-            # 自動計算預設的催繳日期 (下個月 1 號)
-            today = date.today()
-            next_month = today.month + 1 if today.month < 12 else 1
-            next_year = today.year if today.month < 12 else today.year + 1
-            default_remind_start = date(next_year, next_month, 1)
-            
-            remind_date = st.date_input(
-                "📅 自動催繳開始日期", 
-                value=default_remind_start,
-                help="從這天起系統每天自動發送催繳通知",
-                key="remind_date_input"
-            )
-        
-        st.divider()
-        
-        # 儲存和下載按鈕
-        col_save, col_download = st.columns([1, 1])
-        
-        with col_save:
-            st.info("⚠️ 注意：電費記錄功能尚在開發中，目前僅支援下載 CSV")
-        
-        with col_download:
-            csv = details_df.to_csv(index=False, encoding='utf-8-sig')
-            st.download_button(
-                "📥 下載 CSV 備份",
-                csv,
-                f"electricity_{period_id}.csv",
-                "text/csv"
-            )
+        st.info("💡 計費記錄已自動儲存，可前往「📜 繳費記錄」Tab 查看")
 
 
 # ============== Tab 3: 繳費記錄 ==============
@@ -760,7 +735,7 @@ def render_records_tab(elec_service: ElectricityService):
         empty_state(
             "尚無記錄",
             "📭",
-            f"請先在「計算電費」Tab 完成計算並儲存"
+            f"請先在「計算電費」Tab 完成計算（會自動儲存）"
         )
         return
     
@@ -788,7 +763,15 @@ def render_records_tab(elec_service: ElectricityService):
     
     st.divider()
     
-    st.info("💡 提示：目前顯示電費記錄，繳費管理功能開發中")
+    # 下載按鈕
+    csv = df.to_csv(index=False, encoding='utf-8-sig')
+    st.download_button(
+        "📥 下載繳費記錄 CSV",
+        csv,
+        f"payment_records_{period_id}.csv",
+        "text/csv",
+        help="下載此期間的完整繳費記錄"
+    )
 
 
 # ============== 主函數 ==============
