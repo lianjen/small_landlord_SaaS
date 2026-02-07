@@ -1,20 +1,13 @@
 """
-租客聯絡方式服務 - v2.0
-處理 LINE User ID 綁定、通知偏好設定、綁定驗證狀態
-
-✅ 自動建立 / 升級 tenant_contacts 表
-    - 兼容舊 DB（原本只有 tenant_id, line_user_id, notify_*）
-    - 新增欄位：
-        room_number, is_verified, verified_at,
-        pending_room, verification_code, verification_expires_at
-✅ 綁定/解綁 LINE User ID（後台以 tenant_id 綁定，視為已驗證）
-✅ 更新通知偏好
-✅ 查詢綁定狀態
-✅ 對齊 tenants 新欄位 (room_number, tenant_name, is_active, base_rent)
+租客聯絡方式服務 - v3.0 Supabase UUID Compatible
+✅ 修正欄位名稱：name (不是 tenant_name)
+✅ 修正狀態欄位：status = 'active' (不是 is_active = true)
+✅ 修正租金欄位：rent_amount (不是 base_rent), deposit_amount (不是 deposit)
+✅ tenant_id 使用 UUID 字串型別
+✅ 完全兼容 Supabase Schema
 """
 
 from typing import Tuple, Optional, Dict, List
-
 from services.base_db import BaseDBService
 from services.logger import logger, log_db_operation
 
@@ -30,22 +23,20 @@ class TenantContactService(BaseDBService):
 
     def _init_tables(self) -> None:
         """
-        初始化 / 升級 tenant_contacts 表。
-
-        注意：
-        - 舊安裝可能沒有 id 欄位或新增欄位，本方法會用 CREATE TABLE IF NOT EXISTS + ALTER TABLE ADD COLUMN IF NOT EXISTS
-        - 不移除任何既有欄位，確保向後相容
+        初始化 / 升級 tenant_contacts 表（UUID 版本）
+        
+        注意：tenant_id 必須是 UUID 型別以匹配 Supabase tenants.id
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
-                # 1) 若不存在則建立完整新表結構
+                # 建立表（tenant_id 使用 UUID）
                 cursor.execute(
                     """
                     CREATE TABLE IF NOT EXISTS tenant_contacts (
                         id SERIAL PRIMARY KEY,
-                        tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
                         line_user_id TEXT,
                         room_number VARCHAR(10),
                         is_verified BOOLEAN DEFAULT false,
@@ -62,24 +53,7 @@ class TenantContactService(BaseDBService):
                     """
                 )
 
-                # 2) Schema 升級：為舊表補上新欄位（IF NOT EXISTS 保證安全）
-                cursor.execute(
-                    """
-                    ALTER TABLE tenant_contacts
-                        ADD COLUMN IF NOT EXISTS room_number VARCHAR(10),
-                        ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT false,
-                        ADD COLUMN IF NOT EXISTS verified_at TIMESTAMP,
-                        ADD COLUMN IF NOT EXISTS pending_room VARCHAR(10),
-                        ADD COLUMN IF NOT EXISTS verification_code VARCHAR(20),
-                        ADD COLUMN IF NOT EXISTS verification_expires_at TIMESTAMP,
-                        ADD COLUMN IF NOT EXISTS notify_rent BOOLEAN DEFAULT true,
-                        ADD COLUMN IF NOT EXISTS notify_electricity BOOLEAN DEFAULT true,
-                        ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    """
-                )
-
-                # 3) 索引
+                # 建立索引
                 cursor.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_tenant_contacts_tenant_id
@@ -110,16 +84,16 @@ class TenantContactService(BaseDBService):
                     """
                 )
 
-                logger.info("✅ tenant_contacts 表初始化 / 升級完成")
+                logger.info("✅ tenant_contacts 表初始化完成 (UUID 版本)")
 
         except Exception as e:
             logger.error(f"❌ 初始化 tenant_contacts 表失敗: {str(e)}", exc_info=True)
 
-    # ==================== LINE 綁定管理（後台：以 tenant_id 為主） ====================
+    # ==================== LINE 綁定管理 ====================
 
     def bind_line_user(
         self,
-        tenant_id: int,
+        tenant_id: str,  # ✅ UUID 使用字串
         line_user_id: str,
         notify_rent: bool = True,
         notify_electricity: bool = True,
@@ -127,26 +101,27 @@ class TenantContactService(BaseDBService):
         """
         綁定 LINE User ID 到房客（後台操作）
 
+        參數：
+            tenant_id: 房客 UUID（字串格式）
+            line_user_id: LINE User ID
+            notify_rent: 是否接收租金通知
+            notify_electricity: 是否接收電費通知
+
         行為：
-        - 確認 tenants 表中存在且 is_active = true
+        - 確認 tenants 表中存在且 status = 'active'
         - 若同一 LINE 已綁定其他 tenant_id → 報錯
-        - UPSERT tenant_contacts：
-            - line_user_id
-            - room_number（同步當下 tenants.room_number）
-            - is_verified = true（後台綁定視為已驗證）
-            - verified_at = NOW()
-            - notify_*
+        - UPSERT tenant_contacts（後台綁定視為已驗證）
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
-                # 1. 檢查房客是否存在且活躍
+                # 1. 檢查房客是否存在且活躍（使用正確欄位名稱）
                 cursor.execute(
                     """
-                    SELECT id, tenant_name, room_number
+                    SELECT id, name, room_number
                     FROM tenants
-                    WHERE id = %s AND is_active = true
+                    WHERE id = %s AND status = 'active'
                     """,
                     (tenant_id,),
                 )
@@ -170,13 +145,13 @@ class TenantContactService(BaseDBService):
                 )
                 existing = cursor.fetchone()
 
-                if existing and existing[0] != tenant_id:
+                if existing and str(existing[0]) != str(tenant_id):
                     logger.warning(
                         f"綁定失敗：LINE ID {line_user_id} 已綁定到房客 ID {existing[0]}"
                     )
                     return False, f"❌ 此 LINE 帳號已綁定到其他房客（ID: {existing[0]}）"
 
-                # 3. 插入或更新綁定（使用 UPSERT）
+                # 3. UPSERT 綁定
                 cursor.execute(
                     """
                     INSERT INTO tenant_contacts (
@@ -215,15 +190,12 @@ class TenantContactService(BaseDBService):
             logger.error(f"❌ LINE 綁定失敗: {str(e)}", exc_info=True)
             return False, f"❌ 綁定失敗: {str(e)[:100]}"
 
-    def unbind_line_user(self, tenant_id: int) -> Tuple[bool, str]:
+    def unbind_line_user(self, tenant_id: str) -> Tuple[bool, str]:
         """
         解除 LINE 綁定
 
-        行為：
-        - 清除 line_user_id
-        - 將 is_verified 設為 false
-        - 清除 room_number（保留 tenants 那邊才是權威）
-        - 清除 pending_* / verification_* 欄位，避免殘留驗證流程狀態
+        參數：
+            tenant_id: 房客 UUID（字串格式）
         """
         try:
             with self.get_connection() as conn:
@@ -273,16 +245,15 @@ class TenantContactService(BaseDBService):
 
     # ==================== 查詢功能 ====================
 
-    def get_tenant_contact(self, tenant_id: int) -> Optional[Dict]:
+    def get_tenant_contact(self, tenant_id: str) -> Optional[Dict]:
         """
-        取得房客聯絡資訊（兼容舊表，並補上驗證相關欄位）
+        取得房客聯絡資訊
 
-        回傳欄位：
-        - tenant_id, line_user_id, notify_rent, notify_electricity
-        - created_at, updated_at
-        - tenant_name, room_number（COALESCE(tc.room_number, t.room_number)）
-        - is_verified, verified_at
-        - pending_room, verification_code, verification_expires_at
+        參數：
+            tenant_id: 房客 UUID（字串格式）
+
+        回傳：
+            包含聯絡資訊的 Dict，或 None
         """
         try:
             with self.get_connection() as conn:
@@ -297,7 +268,7 @@ class TenantContactService(BaseDBService):
                         tc.notify_electricity,
                         tc.created_at,
                         tc.updated_at,
-                        t.tenant_name,
+                        t.name,
                         COALESCE(tc.room_number, t.room_number) AS room_number,
                         COALESCE(tc.is_verified, false) AS is_verified,
                         tc.verified_at,
@@ -314,10 +285,10 @@ class TenantContactService(BaseDBService):
                 row = cursor.fetchone()
 
                 if not row:
-                    # 如果沒有記錄，檢查房客是否存在
+                    # 檢查房客是否存在
                     cursor.execute(
                         """
-                        SELECT tenant_name, room_number
+                        SELECT name, room_number
                         FROM tenants
                         WHERE id = %s
                         """,
@@ -345,7 +316,7 @@ class TenantContactService(BaseDBService):
                     return None
 
                 return {
-                    "tenant_id": row[0],
+                    "tenant_id": str(row[0]),
                     "line_user_id": row[1],
                     "notify_rent": row[2],
                     "notify_electricity": row[3],
@@ -369,7 +340,7 @@ class TenantContactService(BaseDBService):
         根據 LINE User ID 查詢房客（只回傳已驗證的綁定）
 
         用途：
-        - 之後在發送通知 / LINE Bot 指令時，用 LINE User ID 找到對應的 tenant
+        - LINE Bot 收到訊息時，用 LINE User ID 找到對應的房客
         """
         try:
             with self.get_connection() as conn:
@@ -380,18 +351,18 @@ class TenantContactService(BaseDBService):
                     SELECT
                         t.id,
                         COALESCE(tc.room_number, t.room_number) AS room_number,
-                        t.tenant_name,
+                        t.name,
                         t.phone,
                         tc.notify_rent,
                         tc.notify_electricity,
-                        t.base_rent,
-                        t.deposit,
+                        t.rent_amount,
+                        t.deposit_amount,
                         COALESCE(tc.is_verified, false) AS is_verified
                     FROM tenants t
                     INNER JOIN tenant_contacts tc ON t.id = tc.tenant_id
                     WHERE
                         tc.line_user_id = %s
-                        AND t.is_active = true
+                        AND t.status = 'active'
                         AND COALESCE(tc.is_verified, false) = true
                     """,
                     (line_user_id,),
@@ -403,14 +374,14 @@ class TenantContactService(BaseDBService):
                     return None
 
                 return {
-                    "tenant_id": row[0],
+                    "tenant_id": str(row[0]),
                     "room_number": row[1],
                     "tenant_name": row[2],
                     "phone": row[3],
                     "notify_rent": row[4],
                     "notify_electricity": row[5],
-                    "base_rent": row[6],
-                    "deposit": row[7],
+                    "base_rent": row[6],  # 對應 rent_amount
+                    "deposit": row[7],     # 對應 deposit_amount
                     "is_verified": row[8],
                 }
 
@@ -420,11 +391,11 @@ class TenantContactService(BaseDBService):
 
     def get_all_line_bindings(self) -> List[Dict]:
         """
-        取得所有 LINE 綁定記錄（不依賴 tc.id）
+        取得所有 LINE 綁定記錄
 
-        注意：
-        - 這裡會同時回傳 is_verified，前端可以自行決定是否只顯示已驗證綁定
-        - 僅包含 t.is_active = true 且 tc.line_user_id 不為空的紀錄
+        回傳：
+        - 包含所有綁定資訊的 List[Dict]
+        - 僅包含 status = 'active' 且 line_user_id 不為空的記錄
         """
         try:
             with self.get_connection() as conn:
@@ -438,14 +409,14 @@ class TenantContactService(BaseDBService):
                         tc.notify_rent,
                         tc.notify_electricity,
                         COALESCE(tc.room_number, t.room_number) AS room_number,
-                        t.tenant_name,
+                        t.name,
                         t.phone,
                         COALESCE(tc.is_verified, false) AS is_verified,
                         tc.verified_at
                     FROM tenant_contacts tc
                     INNER JOIN tenants t ON tc.tenant_id = t.id
                     WHERE
-                        t.is_active = true
+                        t.status = 'active'
                         AND tc.line_user_id IS NOT NULL
                     ORDER BY room_number
                     """
@@ -455,7 +426,7 @@ class TenantContactService(BaseDBService):
                 for row in cursor.fetchall():
                     results.append(
                         {
-                            "tenant_id": row[0],
+                            "tenant_id": str(row[0]),
                             "line_user_id": row[1],
                             "notify_rent": row[2],
                             "notify_electricity": row[3],
@@ -478,16 +449,17 @@ class TenantContactService(BaseDBService):
 
     def update_notification_settings(
         self,
-        tenant_id: int,
+        tenant_id: str,  # ✅ UUID 使用字串
         notify_rent: Optional[bool] = None,
         notify_electricity: Optional[bool] = None,
     ) -> Tuple[bool, str]:
         """
         更新通知偏好設定
 
-        行為：
-        - 若 tenant_contacts 尚無紀錄，會自動建立一筆（以預設 notify_* 為主）
-        - 不影響 is_verified / room_number / 驗證流程欄位
+        參數：
+            tenant_id: 房客 UUID（字串格式）
+            notify_rent: 是否接收租金通知
+            notify_electricity: 是否接收電費通知
         """
         try:
             updates: List[str] = []
@@ -530,9 +502,7 @@ class TenantContactService(BaseDBService):
                         (
                             tenant_id,
                             notify_rent if notify_rent is not None else True,
-                            notify_electricity
-                            if notify_electricity is not None
-                            else True,
+                            notify_electricity if notify_electricity is not None else True,
                         ),
                     )
                     log_db_operation("INSERT", "tenant_contacts", True, 1)
@@ -563,19 +533,20 @@ class TenantContactService(BaseDBService):
         """
         取得 LINE 綁定統計資料
 
-        定義：
-        - total_tenants: tenants.is_active = true 的總數
-        - bound_count: 已驗證綁定（is_verified = true 且 line_user_id 不為空）
-        - unbound_count: total_tenants - bound_count
-        - rent_notify_enabled / elec_notify_enabled:
-            已驗證綁定且 notify_* = true 的人數
+        回傳：
+        - total_tenants: 總房客數（status = 'active'）
+        - bound_count: 已驗證綁定數
+        - unbound_count: 未綁定數
+        - binding_rate: 綁定率（%）
+        - rent_notify_enabled: 開啟租金通知人數
+        - elec_notify_enabled: 開啟電費通知人數
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
                 cursor.execute(
-                    "SELECT COUNT(*) FROM tenants WHERE is_active = true"
+                    "SELECT COUNT(*) FROM tenants WHERE status = 'active'"
                 )
                 total_tenants = cursor.fetchone()[0] or 0
 
@@ -585,7 +556,7 @@ class TenantContactService(BaseDBService):
                     FROM tenant_contacts tc
                     INNER JOIN tenants t ON tc.tenant_id = t.id
                     WHERE
-                        t.is_active = true
+                        t.status = 'active'
                         AND tc.line_user_id IS NOT NULL
                         AND COALESCE(tc.is_verified, false) = true
                     """
@@ -598,7 +569,7 @@ class TenantContactService(BaseDBService):
                     FROM tenant_contacts tc
                     INNER JOIN tenants t ON tc.tenant_id = t.id
                     WHERE
-                        t.is_active = true
+                        t.status = 'active'
                         AND tc.line_user_id IS NOT NULL
                         AND COALESCE(tc.is_verified, false) = true
                         AND tc.notify_rent = true
@@ -612,7 +583,7 @@ class TenantContactService(BaseDBService):
                     FROM tenant_contacts tc
                     INNER JOIN tenants t ON tc.tenant_id = t.id
                     WHERE
-                        t.is_active = true
+                        t.status = 'active'
                         AND tc.line_user_id IS NOT NULL
                         AND COALESCE(tc.is_verified, false) = true
                         AND tc.notify_electricity = true
@@ -647,7 +618,7 @@ class TenantContactService(BaseDBService):
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("TenantContactService 測試程式")
+    print("TenantContactService 測試程式 (UUID 版本)")
     print("=" * 60)
 
     service = TenantContactService()
