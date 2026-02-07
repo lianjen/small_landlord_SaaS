@@ -1,5 +1,6 @@
 """
-LINE 綁定管理介面 - v1.2
+LINE 綁定管理介面 - v3.3 UUID Compatible
+✅ 修正：tenant_id 使用 UUID 格式（字串），不再轉換為 int
 ✅ 綁定狀態總覽（支援新舊欄位命名）
 ✅ 顯示並區分「已驗證 / 待驗證 / 未綁定」
 ✅ 批量解除綁定
@@ -150,7 +151,8 @@ def render_binding_overview(tenant_svc: TenantService, contact_svc: TenantContac
         binding_data = []
 
         for _, tenant in tenants_df.iterrows():
-            tenant_id = int(tenant[id_col])
+            # ✅ v3.3 修正：tenant_id 使用字串格式（UUID）
+            tenant_id = str(tenant[id_col])
             room_number = tenant[room_col]
             tenant_name = tenant[name_col]
             phone = tenant[phone_col] if phone_col and phone_col in tenant else "N/A"
@@ -184,7 +186,7 @@ def render_binding_overview(tenant_svc: TenantService, contact_svc: TenantContac
 
             binding_data.append(
                 {
-                    "id": tenant_id,
+                    "id": tenant_id,  # ✅ 保持字串格式
                     "房號": room_number,
                     "房客": tenant_name,
                     "電話": phone,
@@ -286,7 +288,8 @@ def render_binding_overview(tenant_svc: TenantService, contact_svc: TenantContac
                         fail_count = 0
 
                         for tenant_id in selected_ids:
-                            ok, msg = contact_svc.unbind_line_user(int(tenant_id))
+                            # ✅ tenant_id 已經是字串，直接使用
+                            ok, msg = contact_svc.unbind_line_user(tenant_id)
 
                             if ok:
                                 success_count += 1
@@ -334,7 +337,7 @@ def render_binding_editor(tenant_svc: TenantService, contact_svc: TenantContactS
 
         # 房客選擇
         tenant_options = {
-            f"{row[room_col]} - {row[name_col]}": int(row[id_col])
+            f"{row[room_col]} - {row[name_col]}": str(row[id_col])  # ✅ 改為字串
             for _, row in tenants_df.iterrows()
         }
 
@@ -347,10 +350,10 @@ def render_binding_editor(tenant_svc: TenantService, contact_svc: TenantContactS
         if not selected:
             return
 
-        tenant_id = tenant_options[selected]
+        tenant_id = tenant_options[selected]  # ✅ 已經是字串
 
         # 取得目前綁定狀態
-        contact_info = contact_svc.get_tenant_contact(int(tenant_id))
+        contact_info = contact_svc.get_tenant_contact(tenant_id)
 
         st.divider()
 
@@ -402,7 +405,7 @@ def render_binding_editor(tenant_svc: TenantService, contact_svc: TenantContactS
 
                 if update_submitted:
                     ok, msg = contact_svc.update_notification_settings(
-                        int(tenant_id),
+                        tenant_id,  # ✅ 直接使用字串
                         notify_rent=new_notify_rent,
                         notify_electricity=new_notify_elec,
                     )
@@ -425,7 +428,7 @@ def render_binding_editor(tenant_svc: TenantService, contact_svc: TenantContactS
                 type="secondary",
             ):
                 with st.spinner("處理中..."):
-                    ok, msg = contact_svc.unbind_line_user(int(tenant_id))
+                    ok, msg = contact_svc.unbind_line_user(tenant_id)  # ✅ 直接使用字串
 
                     if ok:
                         st.success(msg)
@@ -481,7 +484,7 @@ def render_binding_editor(tenant_svc: TenantService, contact_svc: TenantContactS
                 else:
                     with st.spinner("綁定中..."):
                         ok, msg = contact_svc.bind_line_user(
-                            int(tenant_id),
+                            tenant_id,  # ✅ 直接使用字串
                             line_user_id,
                             notify_rent=bind_notify_rent,
                             notify_electricity=bind_notify_elec,
