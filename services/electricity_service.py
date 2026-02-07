@@ -1,11 +1,12 @@
 """
-電費管理服務 - v4.2 Supabase Compatible
+電費管理服務 - v4.3 Final (Supabase Compatible)
 ✅ 完整的電費期間管理
-✅ 電表讀數儲存
+✅ 電表讀數儲存（含計費資訊）
 ✅ 計費記錄管理
 ✅ 整合通知服務
 ✅ 提供給追蹤頁面的高階查詢 API（get_period_records）
-✅ 完全適配 Supabase 表結構（使用 electricity_readings，不使用 electricity_records）
+✅ 完全適配 Supabase 表結構（使用 electricity_readings）
+✅ 修正：儲存完整計費資訊，確保資料一致性
 """
 
 import pandas as pd
@@ -319,8 +320,20 @@ class ElectricityService(BaseDBService):
         previous: float,
         current: float,
         kwh_used: float,
+        unit_price: float = 0.0,
+        public_share_kwh: int = 0,
+        amount_due: int = 0,
+        room_type: str = "unknown"
     ) -> Tuple[bool, str]:
-        """儲存電表讀數"""
+        """
+        儲存電表讀數（含完整計費資訊）
+        
+        ✅ v4.3 新增參數：
+        - unit_price: 電費單價 (元/度)
+        - public_share_kwh: 公用電分攤度數
+        - amount_due: 應繳金額 (元)
+        - room_type: 房間類型 (獨立房間/分攤房間)
+        """
         try:
             # 驗證讀數邏輯
             if current < previous:
@@ -333,26 +346,38 @@ class ElectricityService(BaseDBService):
                 logger.warning(f"⚠️ {room}: 使用度數計算不符")
                 return False, f"❌ {room}: 使用度數計算錯誤"
 
+            total_kwh = kwh_used + public_share_kwh
+
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
                 cursor.execute(
                     """
                     INSERT INTO electricity_readings
-                        (period_id, room_number, previous_reading, current_reading, kwh_used)
-                    VALUES (%s, %s, %s, %s, %s)
+                        (period_id, room_number, previous_reading, current_reading, 
+                         kwh_used, unit_price, public_share_kwh, total_kwh, amount_due, room_type)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (period_id, room_number) DO UPDATE SET
                         previous_reading = EXCLUDED.previous_reading,
                         current_reading = EXCLUDED.current_reading,
                         kwh_used = EXCLUDED.kwh_used,
+                        unit_price = EXCLUDED.unit_price,
+                        public_share_kwh = EXCLUDED.public_share_kwh,
+                        total_kwh = EXCLUDED.total_kwh,
+                        amount_due = EXCLUDED.amount_due,
+                        room_type = EXCLUDED.room_type,
                         updated_at = NOW()
                     """,
-                    (period_id, room, previous, current, kwh_used),
+                    (period_id, room, previous, current, kwh_used,
+                     unit_price, public_share_kwh, total_kwh, amount_due, room_type),
                 )
 
                 conn.commit()
                 log_db_operation("INSERT", "electricity_readings", True, 1)
-                logger.info(f"✅ {room}: {kwh_used} 度 ({previous} → {current})")
+                logger.info(
+                    f"✅ {room} ({room_type}): {kwh_used}度 "
+                    f"+ {public_share_kwh}分攤 = {total_kwh}度 → ${amount_due}"
+                )
                 return True, f"✅ 已儲存 {room}"
 
         except Exception as e:
@@ -360,12 +385,12 @@ class ElectricityService(BaseDBService):
             logger.error(f"❌ 儲存失敗: {str(e)}")
             return False, f"❌ {str(e)[:100]}"
 
-    # ==================== 計費記錄（已廢棄 electricity_records 表，改用 electricity_readings）====================
+    # ==================== 計費記錄查詢 ====================
 
     def get_payment_record(self, period_id: int) -> Optional[pd.DataFrame]:
         """
         查詢指定期間的電費計費記錄（DataFrame 版本）
-        ✅ 修正：直接從 electricity_readings 查詢，不使用 electricity_records
+        ✅ v4.3 修正：從 electricity_readings 讀取完整計費資訊
         """
         try:
             with self.get_connection() as conn:
@@ -380,9 +405,9 @@ class ElectricityService(BaseDBService):
                         er.previous_reading AS 上期讀數,
                         er.current_reading AS 本期讀數,
                         er.kwh_used AS 使用度數,
-                        0 AS 公用分攤,
-                        er.kwh_used AS 總度數,
-                        CAST(er.kwh_used * 5 AS INTEGER) AS 應繳金額,
+                        COALESCE(er.public_share_kwh, 0) AS 公用分攤,
+                        COALESCE(er.total_kwh, er.kwh_used) AS 總度數,
+                        COALESCE(er.amount_due, 0) AS 應繳金額,
                         0 AS 已繳金額,
                         '⏳ 未繳' AS 繳費狀態,
                         NULL AS 繳費日期,
@@ -436,10 +461,10 @@ class ElectricityService(BaseDBService):
                     """
                     SELECT
                         COUNT(*) as total_count,
-                        SUM(kwh_used * 5) as total_due,
+                        SUM(COALESCE(amount_due, 0)) as total_due,
                         0 as total_paid,
                         0 as paid_count,
-                        SUM(kwh_used * 5) as total_balance,
+                        SUM(COALESCE(amount_due, 0)) as total_balance,
                         SUM(kwh_used) as total_kwh_used
                     FROM electricity_readings
                     WHERE period_id = %s
