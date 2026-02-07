@@ -30,7 +30,7 @@ class DatabaseMigrator:
         
         # 假設你的 user_id（從 Supabase Auth 取得）
         # ⚠️ 需要手動填入你的用戶 ID
-        self.user_id = "YOUR_USER_ID_FROM_SUPABASE"  # TODO: 替換成真實 ID
+        self.user_id = "33c8c176-da01-4b12-a60e-afbd341898c7"  # TODO: 替換成真實 ID
     
     def migrate_tenants(self) -> int:
         """遷移房客資料"""
