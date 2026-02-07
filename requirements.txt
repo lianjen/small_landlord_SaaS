@@ -28,3 +28,8 @@ openpyxl==3.1.2
 
 # ============== Optional: API & HTTP ==============
 requests==2.31.0
+
+# 在你現有的 requirements.txt 加入
+supabase==2.3.5
+gotrue==2.4.2  # Supabase Auth 依賴
+
