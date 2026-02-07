@@ -1,5 +1,5 @@
 """
-電費管理 - v4.2 Supabase Compatible (Service 架構重構)
+電費管理 - v4.3 Complete (含通知功能)
 
 ✅ v3.1 功能：
   - 三種通知模式：不發送 | 手動發送 | 自動發送
@@ -18,6 +18,11 @@
 ✅ v4.2 修正：
   - 計算後自動儲存完整計費資訊到資料庫
   - 確保「計算電費」與「繳費記錄」數據一致
+
+✅ v4.3 補充：
+  - 恢復完整的通知設定功能
+  - 催繳日期設定
+  - LINE 通知發送（手動/自動）
 """
 
 import streamlit as st
@@ -333,6 +338,44 @@ def render_period_tab(elec_service: ElectricityService):
     if selected:
         period_id = period_options[selected]
         st.session_state.current_period_id = period_id
+        
+        # 顯示催繳日期設定
+        period_info = elec_service.get_period_by_id(period_id)
+        
+        st.divider()
+        section_header("催繳日期設定", "🔔", divider=False)
+        
+        current_remind_date = period_info.get('remind_start_date')
+        
+        if current_remind_date:
+            st.info(f"✅ 目前催繳日期: {current_remind_date}")
+        else:
+            st.warning("⚠️ 尚未設定催繳日期")
+        
+        col_date, col_btn = st.columns([3, 1])
+        
+        with col_date:
+            new_remind_date = st.date_input(
+                "設定催繳開始日",
+                value=datetime.strptime(current_remind_date, "%Y-%m-%d").date() if current_remind_date else date.today(),
+                key="remind_date_input"
+            )
+        
+        with col_btn:
+            st.write("")
+            st.write("")
+            if st.button("💾 儲存日期", type="primary"):
+                ok, msg = elec_service.update_period_remind_date(
+                    period_id,
+                    new_remind_date.strftime("%Y-%m-%d")
+                )
+                if ok:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+        
+        st.divider()
         
         col_del, col_info = st.columns([1, 3])
         
@@ -697,6 +740,73 @@ def render_calculation_tab(elec_service: ElectricityService, notify_service: Not
                              '使用度數', '公用分攤', '總度數', '單價', '應繳金額']
         
         data_table(details_df, key="calc_details")
+        
+        st.divider()
+        
+        # ✅ v4.3 新增：通知設定區
+        section_header("通知設定", "🔔", divider=False)
+        
+        st.markdown("### 📱 LINE 電費通知")
+        
+        notify_mode = st.radio(
+            "通知模式",
+            options=["不發送", "手動發送", "自動發送"],
+            horizontal=True,
+            key="notify_mode"
+        )
+        
+        if notify_mode == "不發送":
+            st.info("⚪ 不會發送任何通知")
+        
+        elif notify_mode == "手動發送":
+            st.warning("⚠️ 需要手動點擊「發送通知」按鈕")
+            
+            if st.button("📤 立即發送電費通知", type="primary"):
+                with st.spinner("正在發送通知..."):
+                    tenant_service = TenantService()
+                    success_count = 0
+                    fail_count = 0
+                    
+                    for detail in enriched_details:
+                        room = detail['房號']
+                        amount = detail['應繳金額']
+                        kwh = detail['總度數']
+                        
+                        # 發送通知
+                        ok, msg = notify_service.send_electricity_bill_notification(
+                            room_number=room,
+                            period_id=period_id,
+                            amount=amount,
+                            kwh=kwh
+                        )
+                        
+                        if ok:
+                            success_count += 1
+                        else:
+                            fail_count += 1
+                            logger.error(f"發送失敗: {room} - {msg}")
+                    
+                    if success_count > 0:
+                        st.success(f"✅ 成功發送 {success_count} 則通知")
+                    
+                    if fail_count > 0:
+                        st.error(f"❌ 失敗 {fail_count} 則（可能是租客未綁定 LINE）")
+        
+        elif notify_mode == "自動發送":
+            period_info = elec_service.get_period_by_id(period_id)
+            remind_date = period_info.get('remind_start_date')
+            
+            if not remind_date:
+                st.error("❌ 請先在「計費期間」Tab 設定催繳日期")
+            else:
+                remind_datetime = datetime.strptime(remind_date, "%Y-%m-%d")
+                today = datetime.now()
+                
+                if today >= remind_datetime:
+                    st.success(f"✅ 催繳日期已到（{remind_date}），系統將自動發送通知")
+                else:
+                    days_left = (remind_datetime - today).days
+                    st.info(f"⏳ 催繳日期: {remind_date}（還有 {days_left} 天）")
         
         st.divider()
         
