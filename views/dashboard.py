@@ -1,5 +1,5 @@
 """
-儀表板 - 重構版 v3.0 (Service 架構)
+儀表板 - 重構版 v3.1 (Supabase Compatible)
 特性:
 - ✅ 使用 Service 架構
 - ✅ 修復 DataFrame 布林判斷錯誤
@@ -8,6 +8,7 @@
 - ✅ 效能優化 (快取)
 - ✅ 動態房間數
 - ✅ 統一日期處理
+- ✅ 完全適配 Supabase 欄位結構
 """
 
 import streamlit as st
@@ -86,6 +87,7 @@ class DashboardService(BaseDBService):
                     VALUES (%s, %s)
                 """, (memo_text, priority))
                 
+                conn.commit()
                 return True
         
         except Exception as e:
@@ -105,6 +107,7 @@ class DashboardService(BaseDBService):
                     WHERE id = %s
                 """, (memo_id,))
                 
+                conn.commit()
                 return True
         
         except Exception as e:
@@ -215,13 +218,14 @@ def get_expiring_leases(df_tenants: pd.DataFrame, days: int = 45) -> List[Dict]:
     warning_date = today + timedelta(days=days)
     
     for _, tenant in df_tenants.iterrows():
-        lease_end = safe_parse_date(tenant.get('lease_end'))
+        # ✅ 修正：lease_end → move_out_date
+        lease_end = safe_parse_date(tenant.get('move_out_date'))
         
         if lease_end and today <= lease_end <= warning_date:
             days_left = (lease_end - today).days
             expiring.append({
                 'room': tenant['room_number'],
-                'tenant': tenant['tenant_name'],
+                'tenant': tenant['name'],  # ✅ 修正：tenant_name → name
                 'lease_end': lease_end,
                 'days_left': days_left
             })
@@ -342,7 +346,8 @@ def render_room_status(df_tenants: pd.DataFrame):
     if isinstance(df_tenants, pd.DataFrame) and not df_tenants.empty:
         for _, tenant in df_tenants.iterrows():
             room = tenant['room_number']
-            lease_end = safe_parse_date(tenant.get('lease_end'))
+            # ✅ 修正：lease_end → move_out_date
+            lease_end = safe_parse_date(tenant.get('move_out_date'))
             
             # 判斷狀態
             if lease_end and lease_end <= warning_date:
@@ -351,9 +356,9 @@ def render_room_status(df_tenants: pd.DataFrame):
                 status = 'occupied'
             
             room_status[room] = {
-                'tenant': tenant['tenant_name'],
+                'tenant': tenant['name'],  # ✅ 修正：tenant_name → name
                 'status': status,
-                'rent': tenant.get('base_rent', 0)
+                'rent': tenant.get('rent_amount', 0)  # ✅ 修正：base_rent → rent_amount
             }
     
     # 渲染房間卡片 (每行 3 個)
