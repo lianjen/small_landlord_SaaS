@@ -1,5 +1,5 @@
 """
-租客管理服務 - v5.0 (Pydantic + Supabase + Auth)
+租客管理服務 - v5.1 (修正欄位名稱)
 ✅ 整合 Pydantic 驗證層
 ✅ 自動注入 user_id
 ✅ RLS Policy 兼容
@@ -12,6 +12,7 @@
 ✅ 與 tenant_contacts 整合
 ✅ 完全適配 Supabase
 ✅ 向後兼容
+✅ 欄位名稱已統一 (lease_start/end, rent, deposit)
 """
 
 import pandas as pd
@@ -99,8 +100,8 @@ class TenantService(BaseDBService):
                     f"""
                     SELECT 
                         id, room_number, name, phone, email, id_number,
-                        deposit_amount, rent_amount, rent_due_day,
-                        move_in_date, move_out_date, status, notes,
+                        deposit, rent, rent_due_day,
+                        lease_start, lease_end, status, notes,
                         created_at, updated_at
                     FROM tenants
                     {where_clause}
@@ -185,7 +186,7 @@ class TenantService(BaseDBService):
         根據 ID 查詢租客（自動驗證權限）
 
         Args:
-            tenant_id: 租客 ID (TEXT)
+            tenant_id: 租客 ID (UUID)
 
         Returns:
             租客資訊字典，如果不存在或無權限返回 None
@@ -208,8 +209,8 @@ class TenantService(BaseDBService):
                     f"""
                     SELECT 
                         id, room_number, name, phone, email, id_number,
-                        deposit_amount, rent_amount, rent_due_day,
-                        move_in_date, move_out_date, status, notes,
+                        deposit, rent, rent_due_day,
+                        lease_start, lease_end, status, notes,
                         created_at, updated_at
                     FROM tenants
                     WHERE id = %s {user_id_check}
@@ -257,8 +258,8 @@ class TenantService(BaseDBService):
                     f"""
                     SELECT 
                         id, room_number, name, phone, email, id_number,
-                        deposit_amount, rent_amount, rent_due_day,
-                        move_in_date, move_out_date, status, notes,
+                        deposit, rent, rent_due_day,
+                        lease_start, lease_end, status, notes,
                         created_at, updated_at
                     FROM tenants
                     WHERE room_number = %s AND status = 'active' {user_id_check}
@@ -364,11 +365,11 @@ class TenantService(BaseDBService):
                     "phone": phone or "",
                     "email": email,
                     "id_number": id_number,
-                    "rent_amount": base_rent or deposit or 0,  # ✅ 兼容舊參數名
+                    "rent": base_rent or deposit or 0,  # ✅ 新欄位名
                     "rent_due_day": rent_due_day,
-                    "deposit_amount": deposit or 0,
-                    "move_in_date": start,
-                    "move_out_date": end,
+                    "deposit": deposit or 0,  # ✅ 新欄位名
+                    "lease_start": start,  # ✅ 新欄位名
+                    "lease_end": end,  # ✅ 新欄位名
                     "notes": notes or discount_notes or "",
                 }
                 
@@ -403,8 +404,8 @@ class TenantService(BaseDBService):
                     """
                     INSERT INTO tenants 
                     (user_id, room_number, name, phone, email, id_number,
-                     rent_amount, rent_due_day, deposit_amount,
-                     move_in_date, move_out_date, status, notes)
+                     rent, rent_due_day, deposit,
+                     lease_start, lease_end, status, notes)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                 """,
@@ -415,11 +416,11 @@ class TenantService(BaseDBService):
                         validated_data.get('phone', ''),
                         validated_data.get('email'),
                         validated_data.get('id_number'),
-                        validated_data['rent_amount'],
+                        validated_data['rent'],  # ✅ 新欄位名
                         validated_data.get('rent_due_day', 5),
-                        validated_data['deposit_amount'],
-                        validated_data['move_in_date'],
-                        validated_data.get('move_out_date'),
+                        validated_data['deposit'],  # ✅ 新欄位名
+                        validated_data['lease_start'],  # ✅ 新欄位名
+                        validated_data.get('lease_end'),  # ✅ 新欄位名
                         validated_data.get('status', 'active'),
                         validated_data.get('notes', ''),
                     ),
@@ -509,7 +510,7 @@ class TenantService(BaseDBService):
         使用方式 1（推薦）：
             update_data = TenantUpdate(
                 phone="0912-345-678",
-                rent_amount=6500.0
+                rent=6500.0
             )
             success, msg = service.update_tenant(tenant_id, tenant_data=update_data)
 
@@ -568,15 +569,15 @@ class TenantService(BaseDBService):
                 if id_number is not None:
                     data_dict["id_number"] = id_number
                 if base_rent is not None:
-                    data_dict["rent_amount"] = base_rent
+                    data_dict["rent"] = base_rent  # ✅ 新欄位名
                 if rent_due_day is not None:
                     data_dict["rent_due_day"] = rent_due_day
                 if deposit is not None:
-                    data_dict["deposit_amount"] = deposit
+                    data_dict["deposit"] = deposit  # ✅ 新欄位名
                 if start is not None:
-                    data_dict["move_in_date"] = start
+                    data_dict["lease_start"] = start  # ✅ 新欄位名
                 if end is not None:
-                    data_dict["move_out_date"] = end
+                    data_dict["lease_end"] = end  # ✅ 新欄位名
                 if status is not None:
                     data_dict["status"] = status
                 if notes is not None or discount_notes is not None:
@@ -729,7 +730,7 @@ class TenantService(BaseDBService):
                     f"""
                     UPDATE tenants
                     SET status = 'inactive',
-                        move_out_date = CURRENT_DATE,
+                        lease_end = CURRENT_DATE,
                         updated_at = NOW()
                     WHERE id = %s {user_id_check}
                     """,
@@ -908,9 +909,9 @@ class TenantService(BaseDBService):
                     f"""
                     SELECT 
                         COUNT(*) as total_tenants,
-                        SUM(rent_amount) as total_rent,
-                        AVG(rent_amount) as avg_rent,
-                        SUM(deposit_amount) as total_deposit
+                        SUM(rent) as total_rent,
+                        AVG(rent) as avg_rent,
+                        SUM(deposit) as total_deposit
                     FROM tenants
                     WHERE status = 'active' {user_id_check}
                 """
@@ -1001,14 +1002,14 @@ class TenantService(BaseDBService):
                         room_number, 
                         name, 
                         phone, 
-                        move_out_date,
-                        (move_out_date - CURRENT_DATE) as days_remaining
+                        lease_end,
+                        (lease_end - CURRENT_DATE) as days_remaining
                     FROM tenants
                     WHERE status = 'active' 
-                    AND move_out_date <= CURRENT_DATE + make_interval(days => %s)
-                    AND move_out_date >= CURRENT_DATE
+                    AND lease_end <= CURRENT_DATE + make_interval(days => %s)
+                    AND lease_end >= CURRENT_DATE
                     {user_id_check}
-                    ORDER BY move_out_date
+                    ORDER BY lease_end
                 """,
                     (days,),
                 )
@@ -1052,7 +1053,7 @@ if __name__ == "__main__":
     
     service = TenantService()
 
-    print("=== 測試房客服務 v5.0 (Pydantic + Supabase + Auth) ===\n")
+    print("=== 測試房客服務 v5.1 (欄位名稱已統一) ===\n")
 
     # 測試 0：認證狀態
     print("0. 認證狀態:")
@@ -1069,10 +1070,10 @@ if __name__ == "__main__":
             room_number="4D",
             phone="0912-345-678",
             email="test@example.com",
-            rent_amount=6000.0,
-            deposit_amount=12000.0,
-            move_in_date=date.today(),
-            move_out_date=date.today() + timedelta(days=365)
+            rent=6000.0,
+            deposit=12000.0,
+            lease_start=date.today(),
+            lease_end=date.today() + timedelta(days=365)
         )
         print(f"   ✅ 驗證成功: {tenant_data.name} ({tenant_data.room_number})\n")
     except ValidationError as e:
@@ -1084,8 +1085,8 @@ if __name__ == "__main__":
         tenant_data = TenantCreate(
             name="王",  # ❌ 太短
             room_number="4D",
-            rent_amount=-100,  # ❌ 負數
-            move_in_date=date.today()
+            rent=-100,  # ❌ 負數
+            lease_start=date.today()
         )
         print(f"   ❌ 未攔截錯誤資料\n")
     except ValidationError as e:
