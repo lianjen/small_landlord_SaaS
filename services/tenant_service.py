@@ -1,5 +1,6 @@
 """
-租客管理服務 - v3.2 (Supabase Compatible)
+租客管理服務 - v4.0 (Pydantic + Supabase)
+✅ 整合 Pydantic 驗證層
 ✅ 租客 CRUD 操作
 ✅ 房間佔用檢查
 ✅ 常量驗證
@@ -8,15 +9,24 @@
 ✅ SQL 注入防護
 ✅ DataFrame 安全處理
 ✅ 與 tenant_contacts 整合
-✅ 完全適配 Supabase (name 欄位)
+✅ 完全適配 Supabase
 """
 
 import pandas as pd
-from datetime import date
-from typing import Tuple, Optional, Dict, List
+from datetime import date, datetime
+from typing import Tuple, Optional, Dict, List, Union
+from pydantic import ValidationError
 
 from services.base_db import BaseDBService
 from services.logger import logger, log_db_operation
+
+# ✅ 導入 Pydantic Schemas
+from schemas.tenant import (
+    TenantCreate,
+    TenantUpdate,
+    TenantResponse,
+    TenantListItem
+)
 
 # 導入常量配置
 try:
@@ -41,7 +51,7 @@ except ImportError:
 
 
 class TenantService(BaseDBService):
-    """租客管理服務 (繼承 BaseDBService)"""
+    """租客管理服務 (繼承 BaseDBService，整合 Pydantic)"""
 
     def __init__(self):
         super().__init__()
@@ -67,13 +77,13 @@ class TenantService(BaseDBService):
 
                 condition = "WHERE status = 'active'" if active_only else ""
                 
-                # ✅ 修正：tenant_name → name
                 cursor.execute(
                     f"""
-                    SELECT id, room_number, name, phone, deposit_amount, rent_amount,
-                           move_in_date, move_out_date, payment_method, has_water_fee,
-                           annual_discount_months, discount_notes, last_ac_cleaning_date,
-                           status, created_at
+                    SELECT 
+                        id, room_number, name, phone, email, id_number,
+                        deposit_amount, rent_amount, rent_due_day,
+                        move_in_date, move_out_date, status, notes,
+                        created_at, updated_at
                     FROM tenants
                     {condition}
                     ORDER BY room_number
@@ -152,12 +162,12 @@ class TenantService(BaseDBService):
             logger.error(f"❌ 取得有效房客失敗: {str(e)}", exc_info=True)
             return []
 
-    def get_tenant_by_id(self, tenant_id: int) -> Optional[Dict]:
+    def get_tenant_by_id(self, tenant_id: str) -> Optional[Dict]:
         """
         根據 ID 查詢租客
 
         Args:
-            tenant_id: 租客 ID (UUID)
+            tenant_id: 租客 ID (TEXT)
 
         Returns:
             租客資訊字典，如果不存在返回 None
@@ -166,12 +176,13 @@ class TenantService(BaseDBService):
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
-                # ✅ 修正：tenant_name → name
                 cursor.execute(
                     """
-                    SELECT id, room_number, name, phone, deposit_amount, rent_amount,
-                           move_in_date, move_out_date, payment_method, has_water_fee,
-                           annual_discount_months, discount_notes, status
+                    SELECT 
+                        id, room_number, name, phone, email, id_number,
+                        deposit_amount, rent_amount, rent_due_day,
+                        move_in_date, move_out_date, status, notes,
+                        created_at, updated_at
                     FROM tenants
                     WHERE id = %s
                 """,
@@ -207,12 +218,13 @@ class TenantService(BaseDBService):
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
-                # ✅ 修正：tenant_name → name，is_active → status
                 cursor.execute(
                     """
-                    SELECT id, room_number, name, phone, deposit_amount, rent_amount,
-                           move_in_date, move_out_date, payment_method, has_water_fee,
-                           annual_discount_months, discount_notes, status
+                    SELECT 
+                        id, room_number, name, phone, email, id_number,
+                        deposit_amount, rent_amount, rent_due_day,
+                        move_in_date, move_out_date, status, notes,
+                        created_at, updated_at
                     FROM tenants
                     WHERE room_number = %s AND status = 'active'
                 """,
@@ -234,142 +246,186 @@ class TenantService(BaseDBService):
             logger.error(f"❌ 查詢失敗: {str(e)}", exc_info=True)
             return None
 
-    # ==================== 新增操作 ====================
+    # ==================== 新增操作（整合 Pydantic）====================
 
     def add_tenant(
         self,
-        room: str,
-        name: str,
-        phone: str,
-        deposit: float,
-        base_rent: float,
-        start: date,
-        end: date,
-        payment_method: str,
+        tenant_data: Union[TenantCreate, Dict, None] = None,
+        # ✅ 保留舊參數以向後兼容
+        room: str = None,
+        name: str = None,
+        phone: str = None,
+        deposit: float = None,
+        base_rent: float = None,
+        start: date = None,
+        end: date = None,
+        payment_method: str = None,
         has_water_fee: bool = False,
         annual_discount_months: int = 0,
         discount_notes: str = "",
-        user_id: str = None,  # ✅ 新增：Supabase user_id
+        # ✅ 新增 Pydantic 支援的欄位
+        email: str = None,
+        id_number: str = None,
+        rent_due_day: int = 5,
+        notes: str = None,
     ) -> Tuple[bool, str]:
         """
-        新增租客
+        新增租客（支援 Pydantic 驗證）
+
+        使用方式 1（推薦）：
+            tenant = TenantCreate(
+                name="王小明",
+                room_number="4C",
+                ...
+            )
+            success, msg = service.add_tenant(tenant_data=tenant)
+
+        使用方式 2（向後兼容）：
+            success, msg = service.add_tenant(
+                room="4C",
+                name="王小明",
+                ...
+            )
 
         Args:
-            room: 房號
-            name: 租客姓名
-            phone: 電話
-            deposit: 押金
-            base_rent: 基礎月租
-            start: 租約開始日
-            end: 租約結束日
-            payment_method: 付款方式
-            has_water_fee: 是否包含水費
-            annual_discount_months: 年度折扣月數
-            discount_notes: 折扣備註
-            user_id: Supabase 用戶 ID (必填)
+            tenant_data: TenantCreate 物件或資料字典
+            其他參數: 向後兼容的舊參數
 
         Returns:
             (bool, str): 成功/失敗訊息
         """
         try:
-            # ✅ 驗證 user_id
-            if not user_id:
-                logger.error("❌ 缺少 user_id")
-                return False, "缺少用戶 ID"
+            # ==================== Pydantic 驗證 ====================
+            
+            # 方式 1：使用 TenantCreate 物件
+            if isinstance(tenant_data, TenantCreate):
+                validated_data = tenant_data.model_dump()
+                logger.info("✅ 使用 Pydantic 驗證（TenantCreate 物件）")
+            
+            # 方式 2：使用字典（自動驗證）
+            elif isinstance(tenant_data, dict):
+                try:
+                    tenant_create = TenantCreate(**tenant_data)
+                    validated_data = tenant_create.model_dump()
+                    logger.info("✅ 使用 Pydantic 驗證（字典轉換）")
+                except ValidationError as e:
+                    error_msg = self._format_validation_error(e)
+                    logger.error(f"❌ Pydantic 驗證失敗: {error_msg}")
+                    return False, f"資料驗證失敗: {error_msg}"
+            
+            # 方式 3：傳統參數（組裝後驗證）
+            else:
+                # 組裝資料字典
+                data_dict = {
+                    "name": name,
+                    "room_number": room,
+                    "phone": phone or "",
+                    "email": email,
+                    "id_number": id_number,
+                    "rent_amount": base_rent or deposit or 0,  # ✅ 兼容舊參數名
+                    "rent_due_day": rent_due_day,
+                    "deposit_amount": deposit or 0,
+                    "move_in_date": start,
+                    "move_out_date": end,
+                    "notes": notes or discount_notes or "",
+                }
+                
+                try:
+                    tenant_create = TenantCreate(**data_dict)
+                    validated_data = tenant_create.model_dump()
+                    logger.info("✅ 使用 Pydantic 驗證（傳統參數）")
+                except ValidationError as e:
+                    error_msg = self._format_validation_error(e)
+                    logger.error(f"❌ Pydantic 驗證失敗: {error_msg}")
+                    return False, f"資料驗證失敗: {error_msg}"
 
+            # ==================== 額外業務驗證 ====================
+            
             # 驗證房號
-            if room not in self.all_rooms:
-                logger.warning(f"❌ 房號無效: {room}")
-                return False, f"無效房號: {room}"
+            if validated_data['room_number'] not in self.all_rooms:
+                logger.warning(f"❌ 房號無效: {validated_data['room_number']}")
+                return False, f"無效房號: {validated_data['room_number']}"
 
-            # 驗證付款方式
-            if payment_method not in self.payment_methods:
-                logger.warning(f"❌ 支付方式無效: {payment_method}")
-                return False, f"無效支付方式: {payment_method}"
+            # 檢查房間是否已被佔用
+            if not self.check_room_availability(validated_data['room_number']):
+                logger.warning(f"❌ 房間已被佔用: {validated_data['room_number']}")
+                return False, f"房間 {validated_data['room_number']} 已有租客"
 
-            # 驗證日期邏輯
-            if start >= end:
-                logger.warning(f"❌ 日期邏輯錯誤: 開始日 {start} >= 結束日 {end}")
-                return False, "租約開始日必須早於結束日"
-
+            # ==================== 資料庫操作 ====================
+            
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
-                # 檢查房間是否已被佔用
-                cursor.execute(
-                    "SELECT COUNT(*) FROM tenants WHERE room_number = %s AND status = 'active'",
-                    (room,),
-                )
-
-                if cursor.fetchone()[0] > 0:
-                    logger.warning(f"❌ 房間已被佔用: {room}")
-                    return False, f"房間 {room} 已有租客"
-
-                # ✅ 插入租客（適配 Supabase 欄位）
                 cursor.execute(
                     """
                     INSERT INTO tenants 
-                    (user_id, room_number, name, phone, deposit_amount, rent_amount, 
-                     move_in_date, move_out_date, payment_method, has_water_fee, 
-                     annual_discount_months, discount_notes, status)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active')
+                    (room_number, name, phone, email, id_number,
+                     rent_amount, rent_due_day, deposit_amount,
+                     move_in_date, move_out_date, status, notes)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
                 """,
                     (
-                        user_id,
-                        room,
-                        name,
-                        phone,
-                        deposit,
-                        base_rent,
-                        start,
-                        end,
-                        payment_method,
-                        has_water_fee,
-                        annual_discount_months,
-                        discount_notes,
+                        validated_data['room_number'],
+                        validated_data['name'],
+                        validated_data.get('phone', ''),
+                        validated_data.get('email'),
+                        validated_data.get('id_number'),
+                        validated_data['rent_amount'],
+                        validated_data.get('rent_due_day', 5),
+                        validated_data['deposit_amount'],
+                        validated_data['move_in_date'],
+                        validated_data.get('move_out_date'),
+                        validated_data.get('status', 'active'),
+                        validated_data.get('notes', ''),
                     ),
                 )
 
+                tenant_id = cursor.fetchone()[0]
                 conn.commit()
+                
                 log_db_operation("INSERT", "tenants", True, 1)
-                logger.info(f"✅ 新增租客: {name} ({room})")
-                return True, f"成功新增租客 {name}"
+                logger.info(
+                    f"✅ 新增租客: {validated_data['name']} "
+                    f"({validated_data['room_number']}) - ID: {tenant_id}"
+                )
+                
+                return True, f"成功新增租客 {validated_data['name']}"
+
+        except ValidationError as e:
+            # Pydantic 驗證錯誤
+            error_msg = self._format_validation_error(e)
+            log_db_operation("INSERT", "tenants", False, error=error_msg)
+            logger.error(f"❌ 資料驗證失敗: {error_msg}")
+            return False, f"資料驗證失敗: {error_msg}"
 
         except Exception as e:
+            # 其他錯誤
             log_db_operation("INSERT", "tenants", False, error=str(e))
             logger.error(f"❌ 新增失敗: {str(e)}", exc_info=True)
             return False, f"新增失敗: {str(e)[:100]}"
 
-    def create_tenant(self, tenant_data: Dict) -> Optional[str]:
+    def create_tenant(self, tenant_data: Union[TenantCreate, Dict]) -> Optional[str]:
         """
-        新增房客（別名方法，返回 UUID）
+        新增房客（別名方法，返回 ID）
 
         Args:
-            tenant_data: 房客資料字典
+            tenant_data: TenantCreate 物件或資料字典
 
         Returns:
-            新增房客的 UUID，失敗返回 None
+            新增房客的 ID，失敗返回 None
         """
         try:
-            # ✅ 修正：tenant_name → name
-            success, msg = self.add_tenant(
-                room=tenant_data["room_number"],
-                name=tenant_data["name"],  # ✅ 改這裡
-                phone=tenant_data.get("phone", ""),
-                deposit=tenant_data["deposit_amount"],  # ✅ Supabase 欄位名
-                base_rent=tenant_data["rent_amount"],   # ✅ Supabase 欄位名
-                start=tenant_data["move_in_date"],      # ✅ Supabase 欄位名
-                end=tenant_data["move_out_date"],       # ✅ Supabase 欄位名
-                payment_method=tenant_data["payment_method"],
-                has_water_fee=tenant_data.get("has_water_fee", False),
-                annual_discount_months=tenant_data.get("annual_discount_months", 0),
-                discount_notes=tenant_data.get("discount_notes", ""),
-                user_id=tenant_data.get("user_id"),  # ✅ 必須提供
-            )
+            success, msg = self.add_tenant(tenant_data=tenant_data)
 
             if success:
-                # 取得剛新增的租客 UUID
-                tenant = self.get_tenant_by_room(tenant_data["room_number"])
+                # 取得剛新增的租客 ID
+                if isinstance(tenant_data, TenantCreate):
+                    room_number = tenant_data.room_number
+                else:
+                    room_number = tenant_data.get("room_number")
+                
+                tenant = self.get_tenant_by_room(room_number)
                 return tenant["id"] if tenant else None
 
             return None
@@ -378,11 +434,13 @@ class TenantService(BaseDBService):
             logger.error(f"❌ 新增房客失敗: {str(e)}", exc_info=True)
             return None
 
-    # ==================== 更新操作 ====================
+    # ==================== 更新操作（整合 Pydantic）====================
 
     def update_tenant(
         self,
-        tenant_id: str,  # ✅ UUID 字串
+        tenant_id: str,
+        tenant_data: Union[TenantUpdate, Dict, None] = None,
+        # ✅ 保留舊參數以向後兼容
         room: str = None,
         name: str = None,
         phone: str = None,
@@ -394,133 +452,180 @@ class TenantService(BaseDBService):
         has_water_fee: bool = None,
         annual_discount_months: int = None,
         discount_notes: str = None,
-        tenant_data: Dict = None,
+        # ✅ 新增 Pydantic 支援的欄位
+        email: str = None,
+        id_number: str = None,
+        rent_due_day: int = None,
+        notes: str = None,
+        status: str = None,
     ) -> Tuple[bool, str]:
         """
-        更新租客資訊（支援兩種調用方式）
+        更新租客資訊（支援 Pydantic 驗證）
 
-        方式1：單獨參數
-        方式2：使用 tenant_data 字典
+        使用方式 1（推薦）：
+            update_data = TenantUpdate(
+                phone="0912-345-678",
+                rent_amount=6500.0
+            )
+            success, msg = service.update_tenant(tenant_id, tenant_data=update_data)
+
+        使用方式 2（向後兼容）：
+            success, msg = service.update_tenant(
+                tenant_id,
+                phone="0912-345-678",
+                base_rent=6500.0
+            )
 
         Args:
-            tenant_id: 租客 UUID
-            其他參數: 要更新的欄位（可選）
-            tenant_data: 包含所有更新欄位的字典（可選）
+            tenant_id: 租客 ID
+            tenant_data: TenantUpdate 物件或資料字典
+            其他參數: 向後兼容的舊參數
 
         Returns:
             (bool, str): 成功/失敗訊息
         """
         try:
-            # 如果提供了 tenant_data，從中提取參數
-            if tenant_data:
-                room = tenant_data.get("room_number", room)
-                name = tenant_data.get("name", name)  # ✅ 改這裡
-                phone = tenant_data.get("phone", phone)
-                deposit = tenant_data.get("deposit_amount", deposit)
-                base_rent = tenant_data.get("rent_amount", base_rent)
-                start = tenant_data.get("move_in_date", start)
-                end = tenant_data.get("move_out_date", end)
-                payment_method = tenant_data.get("payment_method", payment_method)
-                has_water_fee = tenant_data.get("has_water_fee", has_water_fee)
-                annual_discount_months = tenant_data.get(
-                    "annual_discount_months", annual_discount_months
-                )
-                discount_notes = tenant_data.get("discount_notes", discount_notes)
+            # ==================== Pydantic 驗證 ====================
+            
+            # 方式 1：使用 TenantUpdate 物件
+            if isinstance(tenant_data, TenantUpdate):
+                validated_data = tenant_data.model_dump(exclude_unset=True)
+                logger.info("✅ 使用 Pydantic 驗證（TenantUpdate 物件）")
+            
+            # 方式 2：使用字典（自動驗證）
+            elif isinstance(tenant_data, dict):
+                try:
+                    tenant_update = TenantUpdate(**tenant_data)
+                    validated_data = tenant_update.model_dump(exclude_unset=True)
+                    logger.info("✅ 使用 Pydantic 驗證（字典轉換）")
+                except ValidationError as e:
+                    error_msg = self._format_validation_error(e)
+                    logger.error(f"❌ Pydantic 驗證失敗: {error_msg}")
+                    return False, f"資料驗證失敗: {error_msg}"
+            
+            # 方式 3：傳統參數（組裝後驗證）
+            else:
+                # 組裝資料字典（只包含有值的欄位）
+                data_dict = {}
+                
+                if name is not None:
+                    data_dict["name"] = name
+                if room is not None:
+                    data_dict["room_number"] = room
+                if phone is not None:
+                    data_dict["phone"] = phone
+                if email is not None:
+                    data_dict["email"] = email
+                if id_number is not None:
+                    data_dict["id_number"] = id_number
+                if base_rent is not None:
+                    data_dict["rent_amount"] = base_rent
+                if rent_due_day is not None:
+                    data_dict["rent_due_day"] = rent_due_day
+                if deposit is not None:
+                    data_dict["deposit_amount"] = deposit
+                if start is not None:
+                    data_dict["move_in_date"] = start
+                if end is not None:
+                    data_dict["move_out_date"] = end
+                if status is not None:
+                    data_dict["status"] = status
+                if notes is not None or discount_notes is not None:
+                    data_dict["notes"] = notes or discount_notes
+                
+                if not data_dict:
+                    return False, "沒有要更新的欄位"
+                
+                try:
+                    tenant_update = TenantUpdate(**data_dict)
+                    validated_data = tenant_update.model_dump(exclude_unset=True)
+                    logger.info("✅ 使用 Pydantic 驗證（傳統參數）")
+                except ValidationError as e:
+                    error_msg = self._format_validation_error(e)
+                    logger.error(f"❌ Pydantic 驗證失敗: {error_msg}")
+                    return False, f"資料驗證失敗: {error_msg}"
 
-            # 驗證必要欄位
-            if not all([
-                room,
-                name,
-                deposit is not None,
-                base_rent is not None,
-                start,
-                end,
-                payment_method,
-            ]):
-                return False, "缺少必要欄位"
+            # ==================== 額外業務驗證 ====================
+            
+            # 檢查租客是否存在
+            existing_tenant = self.get_tenant_by_id(tenant_id)
+            if not existing_tenant:
+                return False, f"租客 ID {tenant_id} 不存在"
 
-            # 驗證房號和付款方式
-            if room not in self.all_rooms:
-                return False, f"無效房號: {room}"
-            if payment_method not in self.payment_methods:
-                return False, f"無效支付方式: {payment_method}"
+            # 驗證房號（如果有變更）
+            if 'room_number' in validated_data:
+                if validated_data['room_number'] not in self.all_rooms:
+                    return False, f"無效房號: {validated_data['room_number']}"
+                
+                # 檢查新房間是否已被佔用（排除自己）
+                existing_room_tenant = self.get_tenant_by_room(validated_data['room_number'])
+                if existing_room_tenant and existing_room_tenant['id'] != tenant_id:
+                    return False, f"房間 {validated_data['room_number']} 已有租客"
 
-            # 驗證日期邏輯
-            if start >= end:
-                return False, "租約開始日必須早於結束日"
-
+            # ==================== 資料庫操作 ====================
+            
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
-                # 檢查租客是否存在
-                cursor.execute(
-                    "SELECT room_number FROM tenants WHERE id = %s",
-                    (tenant_id,),
-                )
-                row = cursor.fetchone()
-                if not row:
-                    return False, f"租客 ID {tenant_id} 不存在"
-
-                old_room = row[0]
-
-                # ✅ 更新 tenants 資料（適配 Supabase）
-                cursor.execute(
-                    """
-                    UPDATE tenants SET
-                        room_number = %s, 
-                        name = %s, 
-                        phone = %s, 
-                        deposit_amount = %s,
-                        rent_amount = %s, 
-                        move_in_date = %s, 
-                        move_out_date = %s, 
-                        payment_method = %s,
-                        has_water_fee = %s, 
-                        annual_discount_months = %s, 
-                        discount_notes = %s,
-                        updated_at = NOW()
+                # 動態組裝 UPDATE SQL
+                set_clauses = []
+                values = []
+                
+                for field, value in validated_data.items():
+                    set_clauses.append(f"{field} = %s")
+                    values.append(value)
+                
+                set_clauses.append("updated_at = NOW()")
+                values.append(tenant_id)
+                
+                sql = f"""
+                    UPDATE tenants
+                    SET {', '.join(set_clauses)}
                     WHERE id = %s
-                """,
-                    (
-                        room,
-                        name,
-                        phone or "",
-                        deposit,
-                        base_rent,
-                        start,
-                        end,
-                        payment_method,
-                        has_water_fee or False,
-                        annual_discount_months or 0,
-                        discount_notes or "",
-                        tenant_id,
-                    ),
-                )
-
+                """
+                
+                cursor.execute(sql, values)
                 conn.commit()
+                
                 log_db_operation("UPDATE", "tenants", True, 1)
                 logger.info(f"✅ 更新租客 ID: {tenant_id}")
 
                 # 若房號有變更，同步更新 tenant_contacts.room_number
-                if old_room != room:
-                    cursor.execute(
-                        """
-                        UPDATE tenant_contacts
-                        SET room_number = %s,
-                            updated_at = NOW()
-                        WHERE tenant_id = %s
-                        """,
-                        (room, tenant_id),
-                    )
-                    if cursor.rowcount > 0:
-                        logger.info(
-                            f"🔄 已同步更新 tenant_contacts.room_number: "
-                            f"{old_room} -> {room} (tenant_id={tenant_id})"
-                        )
+                if 'room_number' in validated_data:
+                    old_room = existing_tenant['room_number']
+                    new_room = validated_data['room_number']
+                    
+                    if old_room != new_room:
+                        try:
+                            cursor.execute(
+                                """
+                                UPDATE tenant_contacts
+                                SET room_number = %s,
+                                    updated_at = NOW()
+                                WHERE tenant_id = %s
+                                """,
+                                (new_room, tenant_id),
+                            )
+                            if cursor.rowcount > 0:
+                                logger.info(
+                                    f"🔄 已同步更新 tenant_contacts.room_number: "
+                                    f"{old_room} -> {new_room}"
+                                )
+                        except Exception:
+                            # tenant_contacts 表可能不存在，忽略錯誤
+                            pass
 
-                return True, f"成功更新租客 {name}"
+                return True, f"成功更新租客資料"
+
+        except ValidationError as e:
+            # Pydantic 驗證錯誤
+            error_msg = self._format_validation_error(e)
+            log_db_operation("UPDATE", "tenants", False, error=error_msg)
+            logger.error(f"❌ 資料驗證失敗: {error_msg}")
+            return False, f"資料驗證失敗: {error_msg}"
 
         except Exception as e:
+            # 其他錯誤
             log_db_operation("UPDATE", "tenants", False, error=str(e))
             logger.error(f"❌ 更新失敗: {str(e)}", exc_info=True)
             return False, f"更新失敗: {str(e)[:100]}"
@@ -536,7 +641,7 @@ class TenantService(BaseDBService):
         - 同步清理 tenant_contacts 中的綁定資訊
 
         Args:
-            tenant_id: 租客 UUID
+            tenant_id: 租客 ID
 
         Returns:
             (bool, str): 成功/失敗訊息
@@ -547,7 +652,7 @@ class TenantService(BaseDBService):
 
                 # 檢查租客是否存在
                 cursor.execute(
-                    "SELECT name FROM tenants WHERE id = %s",  # ✅ 改這裡
+                    "SELECT name FROM tenants WHERE id = %s",
                     (tenant_id,),
                 )
                 row = cursor.fetchone()
@@ -557,7 +662,7 @@ class TenantService(BaseDBService):
 
                 tenant_name = row[0]
 
-                # ✅ 軟刪除（改用 status）
+                # 軟刪除
                 cursor.execute(
                     """
                     UPDATE tenants
@@ -606,6 +711,24 @@ class TenantService(BaseDBService):
             return False, f"刪除失敗: {str(e)[:100]}"
 
     # ==================== 輔助方法 ====================
+
+    def _format_validation_error(self, error: ValidationError) -> str:
+        """
+        格式化 Pydantic 驗證錯誤訊息
+        
+        Args:
+            error: ValidationError 物件
+        
+        Returns:
+            格式化的錯誤訊息
+        """
+        errors = []
+        for err in error.errors():
+            field = " -> ".join(str(loc) for loc in err['loc'])
+            message = err['msg']
+            errors.append(f"{field}: {message}")
+        
+        return "; ".join(errors)
 
     def check_room_availability(self, room_number: str) -> bool:
         """
@@ -697,7 +820,6 @@ class TenantService(BaseDBService):
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
-                # ✅ 適配 Supabase 欄位
                 cursor.execute(
                     """
                     SELECT 
@@ -781,7 +903,6 @@ class TenantService(BaseDBService):
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
-                # ✅ 適配 Supabase 欄位
                 cursor.execute(
                     """
                     SELECT 
@@ -834,48 +955,59 @@ class TenantService(BaseDBService):
 # 本機測試
 # ============================================
 if __name__ == "__main__":
+    from schemas.tenant import TenantCreate, TenantUpdate
+    from datetime import date, timedelta
+    
     service = TenantService()
 
-    print("=== 測試房客服務 (Supabase Edition) ===\n")
+    print("=== 測試房客服務 (Pydantic + Supabase) ===\n")
 
-    # 測試取得所有房客
-    print("1. 所有房客 (DataFrame):")
+    # 測試 1：Pydantic 驗證（應該成功）
+    print("1. 測試 Pydantic 驗證（正確資料）:")
+    try:
+        tenant_data = TenantCreate(
+            name="測試房客",
+            room_number="4D",
+            phone="0912-345-678",
+            email="test@example.com",
+            rent_amount=6000.0,
+            deposit_amount=12000.0,
+            move_in_date=date.today(),
+            move_out_date=date.today() + timedelta(days=365)
+        )
+        print(f"   ✅ 驗證成功: {tenant_data.name} ({tenant_data.room_number})\n")
+    except ValidationError as e:
+        print(f"   ❌ 驗證失敗: {e}\n")
+
+    # 測試 2：Pydantic 驗證（應該失敗）
+    print("2. 測試 Pydantic 驗證（錯誤資料）:")
+    try:
+        tenant_data = TenantCreate(
+            name="王",  # ❌ 太短
+            room_number="4D",
+            rent_amount=-100,  # ❌ 負數
+            move_in_date=date.today()
+        )
+        print(f"   ❌ 未攔截錯誤資料\n")
+    except ValidationError as e:
+        print(f"   ✅ 成功攔截錯誤: {e.error_count()} 個錯誤\n")
+
+    # 測試 3：取得所有房客
+    print("3. 所有房客 (DataFrame):")
     df = service.get_tenants()
     print(f"   共 {len(df)} 筆房客資料\n")
 
-    # 測試取得所有房客 (List)
-    print("2. 所有房客 (List):")
-    tenants = service.get_all_tenants()
-    if tenants:
-        for tenant in tenants[:3]:
-            print(f"   {tenant['room_number']} - {tenant['name']}")  # ✅ 改這裡
-        print(f"   共 {len(tenants)} 筆\n")
-    else:
-        print("   無房客資料\n")
-
-    # 測試統計
-    print("3. 租客統計:")
+    # 測試 4：統計
+    print("4. 租客統計:")
     stats = service.get_tenant_statistics()
     for key, value in stats.items():
         print(f"   {key}: {value}")
 
-    # 測試即將到期
-    print("\n4. 即將到期租約 (45天內):")
-    expiring = service.check_lease_expiry(45)
-    if expiring:
-        for lease in expiring:
-            print(
-                f"   {lease['room_number']} - {lease['name']} "  # ✅ 改這裡
-                f"(剩餘 {lease['days_remaining']} 天)"
-            )
-    else:
-        print("   無即將到期的租約")
-
-    # 測試空房
+    # 測試 5：空房
     print("\n5. 可用房間:")
     vacant = service.get_vacant_rooms()
     if vacant:
-        print(f"   {', '.join(vacant)}")
+        print(f"   {', '.join(vacant[:5])}... (共 {len(vacant)} 間)")
     else:
         print("   無空房")
 
