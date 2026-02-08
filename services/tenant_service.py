@@ -1,15 +1,17 @@
 """
-租客管理服務 - v4.0 (Pydantic + Supabase)
+租客管理服務 - v5.0 (Pydantic + Supabase + Auth)
 ✅ 整合 Pydantic 驗證層
+✅ 自動注入 user_id
+✅ RLS Policy 兼容
+✅ 認證權限檢查
 ✅ 租客 CRUD 操作
 ✅ 房間佔用檢查
-✅ 常量驗證
 ✅ 完整統計功能
-✅ 與其他模組兼容
 ✅ SQL 注入防護
 ✅ DataFrame 安全處理
 ✅ 與 tenant_contacts 整合
 ✅ 完全適配 Supabase
+✅ 向後兼容
 """
 
 import pandas as pd
@@ -51,18 +53,18 @@ except ImportError:
 
 
 class TenantService(BaseDBService):
-    """租客管理服務 (繼承 BaseDBService，整合 Pydantic)"""
+    """租客管理服務 (繼承 BaseDBService，整合認證)"""
 
     def __init__(self):
         super().__init__()
         self.all_rooms = ROOMS.ALL_ROOMS
         self.payment_methods = PAYMENT.METHODS
 
-    # ==================== 查詢操作 ====================
+    # ==================== 查詢操作（整合認證）====================
 
     def get_tenants(self, active_only: bool = True) -> pd.DataFrame:
         """
-        獲取租客列表（返回 DataFrame）
+        獲取租客列表（自動過濾當前用戶）
 
         Args:
             active_only: 是否只查詢活躍租客
@@ -75,8 +77,24 @@ class TenantService(BaseDBService):
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
-                condition = "WHERE status = 'active'" if active_only else ""
+                # ✅ 構建查詢條件
+                conditions = []
                 
+                if active_only:
+                    conditions.append("status = 'active'")
+                
+                # ✅ 自動添加 user_id 過濾（除非是開發模式）
+                if not self.is_dev_mode():
+                    user_id = self._get_current_user_id()
+                    if user_id:
+                        conditions.append(f"user_id = '{user_id}'")
+                    else:
+                        # 未登入，返回空結果
+                        logger.warning("⚠️ 未登入，返回空結果")
+                        return pd.DataFrame()
+                
+                where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
                 cursor.execute(
                     f"""
                     SELECT 
@@ -85,7 +103,7 @@ class TenantService(BaseDBService):
                         move_in_date, move_out_date, status, notes,
                         created_at, updated_at
                     FROM tenants
-                    {condition}
+                    {where_clause}
                     ORDER BY room_number
                 """
                 )
@@ -105,7 +123,7 @@ class TenantService(BaseDBService):
 
     def get_all_tenants(self, include_inactive: bool = True) -> List[Dict]:
         """
-        取得所有房客（返回列表格式）
+        取得所有房客（自動過濾當前用戶）
 
         Args:
             include_inactive: 是否包含已停用的房客
@@ -138,7 +156,7 @@ class TenantService(BaseDBService):
 
     def get_active_tenants(self) -> List[Dict]:
         """
-        取得所有有效房客
+        取得所有有效房客（自動過濾當前用戶）
 
         Returns:
             有效房客列表
@@ -164,27 +182,37 @@ class TenantService(BaseDBService):
 
     def get_tenant_by_id(self, tenant_id: str) -> Optional[Dict]:
         """
-        根據 ID 查詢租客
+        根據 ID 查詢租客（自動驗證權限）
 
         Args:
             tenant_id: 租客 ID (TEXT)
 
         Returns:
-            租客資訊字典，如果不存在返回 None
+            租客資訊字典，如果不存在或無權限返回 None
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
+                # ✅ 自動添加 user_id 檢查
+                user_id_check = ""
+                if not self.is_dev_mode():
+                    user_id = self._get_current_user_id()
+                    if user_id:
+                        user_id_check = f"AND user_id = '{user_id}'"
+                    else:
+                        logger.warning("⚠️ 未登入，無法查詢")
+                        return None
+
                 cursor.execute(
-                    """
+                    f"""
                     SELECT 
                         id, room_number, name, phone, email, id_number,
                         deposit_amount, rent_amount, rent_due_day,
                         move_in_date, move_out_date, status, notes,
                         created_at, updated_at
                     FROM tenants
-                    WHERE id = %s
+                    WHERE id = %s {user_id_check}
                 """,
                     (tenant_id,),
                 )
@@ -192,7 +220,7 @@ class TenantService(BaseDBService):
                 row = cursor.fetchone()
 
                 if not row:
-                    logger.warning(f"⚠️ 找不到租客 ID: {tenant_id}")
+                    logger.warning(f"⚠️ 找不到租客 ID: {tenant_id} 或無權限")
                     return None
 
                 columns = [desc[0] for desc in cursor.description]
@@ -206,7 +234,7 @@ class TenantService(BaseDBService):
 
     def get_tenant_by_room(self, room_number: str) -> Optional[Dict]:
         """
-        根據房號查詢租客
+        根據房號查詢租客（自動過濾當前用戶）
 
         Args:
             room_number: 房號
@@ -218,15 +246,22 @@ class TenantService(BaseDBService):
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
+                # ✅ 自動添加 user_id 檢查
+                user_id_check = ""
+                if not self.is_dev_mode():
+                    user_id = self._get_current_user_id()
+                    if user_id:
+                        user_id_check = f"AND user_id = '{user_id}'"
+
                 cursor.execute(
-                    """
+                    f"""
                     SELECT 
                         id, room_number, name, phone, email, id_number,
                         deposit_amount, rent_amount, rent_due_day,
                         move_in_date, move_out_date, status, notes,
                         created_at, updated_at
                     FROM tenants
-                    WHERE room_number = %s AND status = 'active'
+                    WHERE room_number = %s AND status = 'active' {user_id_check}
                 """,
                     (room_number,),
                 )
@@ -246,7 +281,7 @@ class TenantService(BaseDBService):
             logger.error(f"❌ 查詢失敗: {str(e)}", exc_info=True)
             return None
 
-    # ==================== 新增操作（整合 Pydantic）====================
+    # ==================== 新增操作（整合認證）====================
 
     def add_tenant(
         self,
@@ -270,7 +305,7 @@ class TenantService(BaseDBService):
         notes: str = None,
     ) -> Tuple[bool, str]:
         """
-        新增租客（支援 Pydantic 驗證）
+        新增租客（自動注入 user_id）
 
         使用方式 1（推薦）：
             tenant = TenantCreate(
@@ -295,6 +330,13 @@ class TenantService(BaseDBService):
             (bool, str): 成功/失敗訊息
         """
         try:
+            # ✅ 獲取當前用戶 ID
+            user_id = self._get_current_user_id()
+            
+            # 開發模式允許不登入
+            if not user_id and not self.is_dev_mode():
+                return False, "請先登入"
+
             # ==================== Pydantic 驗證 ====================
             
             # 方式 1：使用 TenantCreate 物件
@@ -356,16 +398,18 @@ class TenantService(BaseDBService):
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
+                # ✅ 自動注入 user_id
                 cursor.execute(
                     """
                     INSERT INTO tenants 
-                    (room_number, name, phone, email, id_number,
+                    (user_id, room_number, name, phone, email, id_number,
                      rent_amount, rent_due_day, deposit_amount,
                      move_in_date, move_out_date, status, notes)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                 """,
                     (
+                        user_id,  # ✅ 自動注入
                         validated_data['room_number'],
                         validated_data['name'],
                         validated_data.get('phone', ''),
@@ -434,7 +478,7 @@ class TenantService(BaseDBService):
             logger.error(f"❌ 新增房客失敗: {str(e)}", exc_info=True)
             return None
 
-    # ==================== 更新操作（整合 Pydantic）====================
+    # ==================== 更新操作（整合認證）====================
 
     def update_tenant(
         self,
@@ -460,7 +504,7 @@ class TenantService(BaseDBService):
         status: str = None,
     ) -> Tuple[bool, str]:
         """
-        更新租客資訊（支援 Pydantic 驗證）
+        更新租客資訊（自動驗證權限）
 
         使用方式 1（推薦）：
             update_data = TenantUpdate(
@@ -485,6 +529,11 @@ class TenantService(BaseDBService):
             (bool, str): 成功/失敗訊息
         """
         try:
+            # ✅ 驗證權限：只能更新自己的租客
+            existing_tenant = self.get_tenant_by_id(tenant_id)
+            if not existing_tenant:
+                return False, f"租客 ID {tenant_id} 不存在或無權限"
+
             # ==================== Pydantic 驗證 ====================
             
             # 方式 1：使用 TenantUpdate 物件
@@ -547,11 +596,6 @@ class TenantService(BaseDBService):
 
             # ==================== 額外業務驗證 ====================
             
-            # 檢查租客是否存在
-            existing_tenant = self.get_tenant_by_id(tenant_id)
-            if not existing_tenant:
-                return False, f"租客 ID {tenant_id} 不存在"
-
             # 驗證房號（如果有變更）
             if 'room_number' in validated_data:
                 if validated_data['room_number'] not in self.all_rooms:
@@ -578,13 +622,24 @@ class TenantService(BaseDBService):
                 set_clauses.append("updated_at = NOW()")
                 values.append(tenant_id)
                 
+                # ✅ 自動添加 user_id 檢查（確保只能更新自己的資料）
+                user_id_check = ""
+                if not self.is_dev_mode():
+                    user_id = self._get_current_user_id()
+                    if user_id:
+                        user_id_check = f"AND user_id = '{user_id}'"
+                
                 sql = f"""
                     UPDATE tenants
                     SET {', '.join(set_clauses)}
-                    WHERE id = %s
+                    WHERE id = %s {user_id_check}
                 """
                 
                 cursor.execute(sql, values)
+                
+                if cursor.rowcount == 0:
+                    return False, f"租客 ID {tenant_id} 不存在或無權限"
+                
                 conn.commit()
                 
                 log_db_operation("UPDATE", "tenants", True, 1)
@@ -630,11 +685,11 @@ class TenantService(BaseDBService):
             logger.error(f"❌ 更新失敗: {str(e)}", exc_info=True)
             return False, f"更新失敗: {str(e)[:100]}"
 
-    # ==================== 刪除操作 ====================
+    # ==================== 刪除操作（整合認證）====================
 
     def delete_tenant(self, tenant_id: str) -> Tuple[bool, str]:
         """
-        刪除租客（軟刪除）
+        刪除租客（軟刪除，自動驗證權限）
 
         行為：
         - tenants.status = 'inactive'
@@ -650,26 +705,33 @@ class TenantService(BaseDBService):
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
+                # ✅ 自動添加 user_id 檢查
+                user_id_check = ""
+                if not self.is_dev_mode():
+                    user_id = self._get_current_user_id()
+                    if user_id:
+                        user_id_check = f"AND user_id = '{user_id}'"
+
                 # 檢查租客是否存在
                 cursor.execute(
-                    "SELECT name FROM tenants WHERE id = %s",
+                    f"SELECT name FROM tenants WHERE id = %s {user_id_check}",
                     (tenant_id,),
                 )
                 row = cursor.fetchone()
 
                 if not row:
-                    return False, f"租客 ID {tenant_id} 不存在"
+                    return False, f"租客 ID {tenant_id} 不存在或無權限"
 
                 tenant_name = row[0]
 
                 # 軟刪除
                 cursor.execute(
-                    """
+                    f"""
                     UPDATE tenants
                     SET status = 'inactive',
                         move_out_date = CURRENT_DATE,
                         updated_at = NOW()
-                    WHERE id = %s
+                    WHERE id = %s {user_id_check}
                     """,
                     (tenant_id,),
                 )
@@ -732,7 +794,7 @@ class TenantService(BaseDBService):
 
     def check_room_availability(self, room_number: str) -> bool:
         """
-        檢查房間是否可用
+        檢查房間是否可用（自動過濾當前用戶）
 
         Args:
             room_number: 房號
@@ -743,8 +805,16 @@ class TenantService(BaseDBService):
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
+                
+                # ✅ 自動添加 user_id 檢查
+                user_id_check = ""
+                if not self.is_dev_mode():
+                    user_id = self._get_current_user_id()
+                    if user_id:
+                        user_id_check = f"AND user_id = '{user_id}'"
+                
                 cursor.execute(
-                    "SELECT COUNT(*) FROM tenants WHERE room_number = %s AND status = 'active'",
+                    f"SELECT COUNT(*) FROM tenants WHERE room_number = %s AND status = 'active' {user_id_check}",
                     (room_number,),
                 )
 
@@ -762,7 +832,7 @@ class TenantService(BaseDBService):
 
     def get_available_rooms(self) -> List[str]:
         """
-        取得所有可用房間
+        取得所有可用房間（自動過濾當前用戶）
 
         Returns:
             可用房間列表
@@ -771,11 +841,18 @@ class TenantService(BaseDBService):
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
+                # ✅ 自動添加 user_id 檢查
+                user_id_check = ""
+                if not self.is_dev_mode():
+                    user_id = self._get_current_user_id()
+                    if user_id:
+                        user_id_check = f"AND user_id = '{user_id}'"
+
                 cursor.execute(
-                    """
+                    f"""
                     SELECT room_number 
                     FROM tenants 
-                    WHERE status = 'active'
+                    WHERE status = 'active' {user_id_check}
                 """
                 )
 
@@ -811,7 +888,7 @@ class TenantService(BaseDBService):
 
     def get_tenant_statistics(self) -> Dict:
         """
-        取得租客統計數據
+        取得租客統計數據（自動過濾當前用戶）
 
         Returns:
             統計數據字典
@@ -820,15 +897,22 @@ class TenantService(BaseDBService):
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
+                # ✅ 自動添加 user_id 檢查
+                user_id_check = ""
+                if not self.is_dev_mode():
+                    user_id = self._get_current_user_id()
+                    if user_id:
+                        user_id_check = f"AND user_id = '{user_id}'"
+
                 cursor.execute(
-                    """
+                    f"""
                     SELECT 
                         COUNT(*) as total_tenants,
                         SUM(rent_amount) as total_rent,
                         AVG(rent_amount) as avg_rent,
                         SUM(deposit_amount) as total_deposit
                     FROM tenants
-                    WHERE status = 'active'
+                    WHERE status = 'active' {user_id_check}
                 """
                 )
 
@@ -891,7 +975,7 @@ class TenantService(BaseDBService):
 
     def get_expiring_leases(self, days: int = 30) -> List[Dict]:
         """
-        取得即將到期的租約
+        取得即將到期的租約（自動過濾當前用戶）
 
         Args:
             days: 提前天數（預設 30 天）
@@ -903,8 +987,15 @@ class TenantService(BaseDBService):
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
+                # ✅ 自動添加 user_id 檢查
+                user_id_check = ""
+                if not self.is_dev_mode():
+                    user_id = self._get_current_user_id()
+                    if user_id:
+                        user_id_check = f"AND user_id = '{user_id}'"
+
                 cursor.execute(
-                    """
+                    f"""
                     SELECT 
                         id, 
                         room_number, 
@@ -916,6 +1007,7 @@ class TenantService(BaseDBService):
                     WHERE status = 'active' 
                     AND move_out_date <= CURRENT_DATE + make_interval(days => %s)
                     AND move_out_date >= CURRENT_DATE
+                    {user_id_check}
                     ORDER BY move_out_date
                 """,
                     (days,),
@@ -960,7 +1052,14 @@ if __name__ == "__main__":
     
     service = TenantService()
 
-    print("=== 測試房客服務 (Pydantic + Supabase) ===\n")
+    print("=== 測試房客服務 v5.0 (Pydantic + Supabase + Auth) ===\n")
+
+    # 測試 0：認證狀態
+    print("0. 認證狀態:")
+    print(f"   已登入: {service.is_authenticated()}")
+    print(f"   開發模式: {service.is_dev_mode()}")
+    user_id = service._get_current_user_id()
+    print(f"   User ID: {user_id or '無'}\n")
 
     # 測試 1：Pydantic 驗證（應該成功）
     print("1. 測試 Pydantic 驗證（正確資料）:")
