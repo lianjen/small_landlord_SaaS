@@ -1,5 +1,6 @@
 """
-智能催繳引擎 - v4.1
+智能催繳引擎 - v4.2 (Supabase Schema 修正版)
+✅ 修正欄位名稱：tenant_name → name, is_active → status
 ✅ 根據租客歷史行為動態調整提醒策略
 ✅ 多階段催繳（溫和→友善→正式→最終）
 ✅ 自動學習和優化
@@ -530,6 +531,10 @@ class ReminderService(BaseDBService):
         """
         取得需要催繳的租客列表（僅包含已完成 LINE 綁定驗證且開啟租金通知者）
         
+        ✅ 修正欄位名稱：
+        - tenant_name → name
+        - is_active → status = 'active'
+        
         Args:
             check_date: 檢查日期（可選，默認為今天）
         
@@ -547,12 +552,12 @@ class ReminderService(BaseDBService):
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
-                # 查詢未繳款的租金記錄 + 已驗證的 LINE 綁定 / 通知偏好
+                # ✅ 修正：使用正確的 Supabase 欄位名稱
                 cursor.execute("""
                     SELECT 
                         ps.id,
                         t.id AS tenant_id,
-                        t.tenant_name,
+                        t.name,
                         t.room_number,
                         ps.amount,
                         ps.due_date,
@@ -564,7 +569,7 @@ class ReminderService(BaseDBService):
                     FROM payment_schedule ps
                     LEFT JOIN tenants t 
                         ON ps.room_number = t.room_number 
-                       AND t.is_active = true
+                       AND t.status = 'active'
                     LEFT JOIN tenant_contacts tc
                         ON t.id = tc.tenant_id
                     WHERE ps.status = 'unpaid'
@@ -577,6 +582,8 @@ class ReminderService(BaseDBService):
                 
                 tenants: List[Dict] = []
                 rows = cursor.fetchall()
+                
+                logger.info(f"🔍 查詢到 {len(rows)} 筆未繳款記錄（已驗證 LINE 綁定）")
                 
                 for row in rows:
                     (
@@ -614,6 +621,8 @@ class ReminderService(BaseDBService):
                             'is_verified': bool(is_verified),
                             'notify_rent': bool(notify_rent),
                         })
+                        
+                        logger.info(f"✅ 需要催繳: {room} ({name}) - {stage.value}")
                 
                 log_db_operation("SELECT", "tenants_needing_reminder", True, len(tenants))
                 logger.info(f"✅ 找到 {len(tenants)} 位需要催繳的租客（已驗證 LINE 綁定）")
@@ -622,6 +631,8 @@ class ReminderService(BaseDBService):
         except Exception as e:
             log_db_operation("SELECT", "tenants_needing_reminder", False, error=str(e))
             logger.error(f"❌ 查詢失敗: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return []
     
     def get_risk_report(self) -> Dict:
