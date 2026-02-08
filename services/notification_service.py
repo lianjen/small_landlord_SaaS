@@ -1,10 +1,11 @@
 """
-統一通知服務 - v4.2
+統一通知服務 - v4.3 (Supabase Schema 修正版)
+✅ 修正欄位名稱：tenant_name → name, is_active → status
 ✅ 整合 LINE/Email 發送
 ✅ 自動寫入 notification_logs
 ✅ 支援電費、租金、催繳等多種通知類型
 ✅ 完整的錯誤追蹤
-✅ 系統設定管理 (新增)
+✅ 系統設定管理
 ✅ 僅對已驗證的 LINE 綁定 (is_verified) 發送租金 / 電費通知
 """
 
@@ -32,7 +33,7 @@ class NotificationService(BaseDBService):
         if not self.line_token:
             logger.warning("⚠️ 未設定 LINE_CHANNEL_ACCESS_TOKEN，LINE 通知功能將無法使用")
     
-    # ============= 系統設定管理 (新增) =============
+    # ============= 系統設定管理 =============
     
     def get_all_settings(self) -> Dict[str, str]:
         """
@@ -166,7 +167,7 @@ class NotificationService(BaseDBService):
             logger.error(f"❌ 刪除設定失敗 ({key}): {str(e)}")
             return False, f"❌ 刪除失敗: {str(e)[:100]}"
     
-    # ============= 通知記錄查詢 (新增) =============
+    # ============= 通知記錄查詢 =============
     
     def get_recent_notifications(self, limit: int = 10) -> List[Dict]:
         """
@@ -341,6 +342,8 @@ class NotificationService(BaseDBService):
         """
         發送電費帳單通知 + 寫入 notification_logs
         
+        ✅ 修正欄位：tenant_name → name
+        
         僅對 tenant_contacts 中 line_user_id 不為空、notify_electricity = true、
         且 is_verified = true 的房客發送通知。
         
@@ -372,7 +375,7 @@ class NotificationService(BaseDBService):
                     (remind_date, period_id)
                 )
                 
-                # 2. 取得該期間的未繳記錄 + 租客信息
+                # 2. ✅ 修正：使用正確的欄位名稱 (name)
                 cursor.execute(
                     """
                     SELECT 
@@ -380,7 +383,7 @@ class NotificationService(BaseDBService):
                         er.room_number,
                         er.amount_due,
                         er.tenant_id,
-                        t.tenant_name,
+                        t.name,
                         tc.line_user_id,
                         tc.notify_electricity,
                         COALESCE(tc.is_verified, false) AS is_verified,
@@ -407,6 +410,8 @@ class NotificationService(BaseDBService):
                 if not records:
                     logger.info("📭 沒有需要通知的租客（無已驗證綁定）")
                     return True, "📭 沒有需要通知的租客（無已驗證綁定）", 0
+                
+                logger.info(f"🔍 找到 {len(records)} 筆需要發送電費通知")
                 
                 for record in records:
                     (
@@ -566,6 +571,8 @@ class NotificationService(BaseDBService):
         except Exception as e:
             log_db_operation("NOTIFICATION", "electricity_records", False, error=str(e))
             logger.error(f"❌ 電費通知失敗: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False, f"❌ 電費通知失敗: {str(e)[:100]}", 0
     
     # ============= 租金催繳通知 =============
@@ -577,6 +584,8 @@ class NotificationService(BaseDBService):
     ) -> Tuple[bool, str]:
         """
         發送租金催繳通知 + 寫入 notification_logs
+        
+        ✅ 修正欄位：is_active → status = 'active'
         
         僅在 tenant_contacts 有 line_user_id 且 is_verified = true 的情況下發送。
         
@@ -591,7 +600,7 @@ class NotificationService(BaseDBService):
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
-                # 查詢租金資訊 + 綁定狀態
+                # ✅ 修正：使用正確的欄位條件 (status = 'active')
                 cursor.execute(
                     """
                     SELECT 
@@ -606,7 +615,9 @@ class NotificationService(BaseDBService):
                         tc.notify_rent,
                         COALESCE(tc.is_verified, false) AS is_verified
                     FROM payment_schedule ps
-                    LEFT JOIN tenants t ON ps.room_number = t.room_number AND t.is_active = true
+                    LEFT JOIN tenants t 
+                        ON ps.room_number = t.room_number 
+                       AND t.status = 'active'
                     LEFT JOIN tenant_contacts tc ON t.id = tc.tenant_id
                     WHERE ps.id = %s AND ps.status = 'unpaid'
                     """,
@@ -631,6 +642,8 @@ class NotificationService(BaseDBService):
                     notify_rent,
                     is_verified,
                 ) = result
+                
+                logger.info(f"🔍 查詢租金記錄: {room} ({tenant_name}), LINE ID: {line_id}, verified: {is_verified}")
                 
                 if not line_id:
                     logger.warning(f"⚠️ {tenant_name} 未設定 LINE User ID")
@@ -707,6 +720,7 @@ class NotificationService(BaseDBService):
                 message = messages.get(reminder_stage, messages["first"])
                 
                 # 發送 LINE
+                logger.info(f"📤 準備發送 LINE 訊息到: {line_id}")
                 response = self.send_line_message(line_id, message)
                 
                 # 準備 meta_json
@@ -757,6 +771,8 @@ class NotificationService(BaseDBService):
         except Exception as e:
             log_db_operation("NOTIFICATION", "payment_schedule", False, error=str(e))
             logger.error(f"❌ 租金催繳失敗: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False, f"❌ 租金催繳失敗: {str(e)[:100]}"
     
     # ============= 批次租金催繳 =============
