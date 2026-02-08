@@ -1,10 +1,14 @@
 """
-租金管理服務 - v4.1 (UI 介面整合版)
-- 租金排程 CRUD
-- 批次操作
-- 統計分析 / 本月摘要
-- 逾期檢測
-- 提供給各租金管理頁面 (views.rent) 使用的高階查詢 API
+租金管理服務 - v5.0 (UI 介面整合版 + Auth)
+✅ 自動注入 user_id
+✅ RLS Policy 兼容
+✅ 認證權限檢查
+✅ 租金排程 CRUD
+✅ 批次操作
+✅ 統計分析 / 本月摘要
+✅ 逾期檢測
+✅ 提供給各租金管理頁面 (views.rent) 使用的高階查詢 API
+✅ 向後兼容
 """
 
 import pandas as pd
@@ -16,12 +20,12 @@ from services.logger import logger, log_db_operation
 
 
 class PaymentService(BaseDBService):
-    """租金管理服務 (繼承 BaseDBService)"""
+    """租金管理服務 (繼承 BaseDBService，整合認證)"""
 
     def __init__(self):
         super().__init__()
 
-    # ==================== 查詢操作（底層 DataFrame / 單筆） ====================
+    # ==================== 查詢操作（整合認證）====================
 
     def get_payment_schedule(
         self,
@@ -31,7 +35,7 @@ class PaymentService(BaseDBService):
         status: Optional[str] = None,
     ) -> pd.DataFrame:
         """
-        查詢租金排程（回傳 DataFrame，給報表或批次工具使用）
+        查詢租金排程（自動過濾當前用戶，回傳 DataFrame）
         """
 
         def query():
@@ -40,6 +44,17 @@ class PaymentService(BaseDBService):
 
                 conditions = ["1=1"]
                 params: List = []
+
+                # ✅ 自動添加 user_id 過濾（除非是開發模式）
+                if not self.is_dev_mode():
+                    user_id = self._get_current_user_id()
+                    if user_id:
+                        conditions.append("user_id = %s")
+                        params.append(user_id)
+                    else:
+                        # 未登入，返回空結果
+                        logger.warning("⚠️ 未登入，返回空結果")
+                        return pd.DataFrame()
 
                 if year:
                     conditions.append("payment_year = %s")
@@ -85,14 +100,27 @@ class PaymentService(BaseDBService):
 
     def get_payment_by_id(self, payment_id: int) -> Optional[Dict]:
         """
-        根據 ID 查詢單筆租金記錄
+        根據 ID 查詢單筆租金記錄（自動驗證權限）
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
+                # ✅ 自動添加 user_id 檢查
+                user_id_check = ""
+                params = [payment_id]
+                
+                if not self.is_dev_mode():
+                    user_id = self._get_current_user_id()
+                    if user_id:
+                        user_id_check = "AND user_id = %s"
+                        params.append(user_id)
+                    else:
+                        logger.warning("⚠️ 未登入，無法查詢")
+                        return None
+
                 cursor.execute(
-                    """
+                    f"""
                     SELECT
                         id,
                         room_number,
@@ -105,15 +133,15 @@ class PaymentService(BaseDBService):
                         due_date,
                         status
                     FROM payment_schedule
-                    WHERE id = %s
+                    WHERE id = %s {user_id_check}
                     """,
-                    (payment_id,),
+                    params,
                 )
 
                 row = cursor.fetchone()
 
                 if not row:
-                    logger.warning(f"找不到租金記錄 ID: {payment_id}")
+                    logger.warning(f"找不到租金記錄 ID: {payment_id} 或無權限")
                     return None
 
                 columns = [desc[0] for desc in cursor.description]
@@ -127,7 +155,7 @@ class PaymentService(BaseDBService):
 
     def get_overdue_payments(self) -> List[Dict]:
         """
-        查詢逾期租金（狀態為 unpaid 且到期日 <= 今天）
+        查詢逾期租金（自動過濾當前用戶）
 
         Returns:
             List[Dict]: 逾期租金列表
@@ -135,8 +163,19 @@ class PaymentService(BaseDBService):
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
+
+                # ✅ 自動添加 user_id 檢查
+                user_id_check = ""
+                params: List = []
+                
+                if not self.is_dev_mode():
+                    user_id = self._get_current_user_id()
+                    if user_id:
+                        user_id_check = "AND user_id = %s"
+                        params.append(user_id)
+
                 cursor.execute(
-                    """
+                    f"""
                     SELECT
                         id,
                         room_number,
@@ -152,8 +191,10 @@ class PaymentService(BaseDBService):
                     FROM payment_schedule
                     WHERE status = 'unpaid'
                       AND due_date <= CURRENT_DATE
+                      {user_id_check}
                     ORDER BY due_date
-                    """
+                    """,
+                    params,
                 )
 
                 columns = [desc[0] for desc in cursor.description]
@@ -177,17 +218,28 @@ class PaymentService(BaseDBService):
             logger.error(f"查詢逾期租金失敗: {str(e)}")
             return []
 
-    # ==================== 高階查詢與摘要（給 views.rent 用） ====================
+    # ==================== 高階查詢與摘要（給 views.rent 用）====================
 
     def get_all_payments(self) -> List[Dict]:
         """
-        取得所有租金記錄（收款管理 tab 使用）
+        取得所有租金記錄（自動過濾當前用戶，收款管理 tab 使用）
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
+
+                # ✅ 自動添加 user_id 檢查
+                user_id_check = ""
+                params: List = []
+                
+                if not self.is_dev_mode():
+                    user_id = self._get_current_user_id()
+                    if user_id:
+                        user_id_check = "WHERE user_id = %s"
+                        params.append(user_id)
+
                 cursor.execute(
-                    """
+                    f"""
                     SELECT
                         id,
                         room_number,
@@ -200,8 +252,10 @@ class PaymentService(BaseDBService):
                         due_date,
                         status
                     FROM payment_schedule
+                    {user_id_check}
                     ORDER BY payment_year DESC, payment_month DESC, room_number
-                    """
+                    """,
+                    params,
                 )
                 columns = [d[0] for d in cursor.description]
                 rows = cursor.fetchall()
@@ -218,13 +272,26 @@ class PaymentService(BaseDBService):
 
     def get_unpaid_payments(self) -> List[Dict]:
         """
-        取得所有未繳租金（含尚未逾期）
+        取得所有未繳租金（自動過濾當前用戶）
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
+
+                # ✅ 自動添加 user_id 檢查
+                conditions = ["status = 'unpaid'"]
+                params: List = []
+                
+                if not self.is_dev_mode():
+                    user_id = self._get_current_user_id()
+                    if user_id:
+                        conditions.append("user_id = %s")
+                        params.append(user_id)
+
+                where_clause = " AND ".join(conditions)
+
                 cursor.execute(
-                    """
+                    f"""
                     SELECT
                         id,
                         room_number,
@@ -237,9 +304,10 @@ class PaymentService(BaseDBService):
                         due_date,
                         status
                     FROM payment_schedule
-                    WHERE status = 'unpaid'
+                    WHERE {where_clause}
                     ORDER BY due_date, room_number
-                    """
+                    """,
+                    params,
                 )
                 columns = [d[0] for d in cursor.description]
                 rows = cursor.fetchall()
@@ -256,13 +324,26 @@ class PaymentService(BaseDBService):
 
     def get_paid_payments(self) -> List[Dict]:
         """
-        取得所有已繳租金
+        取得所有已繳租金（自動過濾當前用戶）
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
+
+                # ✅ 自動添加 user_id 檢查
+                conditions = ["status = 'paid'"]
+                params: List = []
+                
+                if not self.is_dev_mode():
+                    user_id = self._get_current_user_id()
+                    if user_id:
+                        conditions.append("user_id = %s")
+                        params.append(user_id)
+
+                where_clause = " AND ".join(conditions)
+
                 cursor.execute(
-                    """
+                    f"""
                     SELECT
                         id,
                         room_number,
@@ -275,9 +356,10 @@ class PaymentService(BaseDBService):
                         due_date,
                         status
                     FROM payment_schedule
-                    WHERE status = 'paid'
+                    WHERE {where_clause}
                     ORDER BY payment_year DESC, payment_month DESC, room_number
-                    """
+                    """,
+                    params,
                 )
                 columns = [d[0] for d in cursor.description]
                 rows = cursor.fetchall()
@@ -294,13 +376,26 @@ class PaymentService(BaseDBService):
 
     def get_payments_by_period(self, year: int, month: int) -> List[Dict]:
         """
-        依年/月取得所有房間的租金記錄（本月摘要 tab 使用）
+        依年/月取得所有房間的租金記錄（自動過濾當前用戶，本月摘要 tab 使用）
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
+
+                # ✅ 自動添加 user_id 檢查
+                conditions = ["payment_year = %s", "payment_month = %s"]
+                params = [year, month]
+                
+                if not self.is_dev_mode():
+                    user_id = self._get_current_user_id()
+                    if user_id:
+                        conditions.append("user_id = %s")
+                        params.append(user_id)
+
+                where_clause = " AND ".join(conditions)
+
                 cursor.execute(
-                    """
+                    f"""
                     SELECT
                         id,
                         room_number,
@@ -313,10 +408,10 @@ class PaymentService(BaseDBService):
                         due_date,
                         status
                     FROM payment_schedule
-                    WHERE payment_year = %s AND payment_month = %s
+                    WHERE {where_clause}
                     ORDER BY room_number
                     """,
-                    (year, month),
+                    params,
                 )
                 columns = [d[0] for d in cursor.description]
                 rows = cursor.fetchall()
@@ -335,13 +430,30 @@ class PaymentService(BaseDBService):
         self, room_number: str, year: int, month: int
     ) -> List[Dict]:
         """
-        取得單一房號在某年/月的租金記錄（本月摘要單房使用）
+        取得單一房號在某年/月的租金記錄（自動過濾當前用戶）
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
+
+                # ✅ 自動添加 user_id 檢查
+                conditions = [
+                    "room_number = %s",
+                    "payment_year = %s",
+                    "payment_month = %s"
+                ]
+                params = [room_number, year, month]
+                
+                if not self.is_dev_mode():
+                    user_id = self._get_current_user_id()
+                    if user_id:
+                        conditions.append("user_id = %s")
+                        params.append(user_id)
+
+                where_clause = " AND ".join(conditions)
+
                 cursor.execute(
-                    """
+                    f"""
                     SELECT
                         id,
                         room_number,
@@ -354,10 +466,10 @@ class PaymentService(BaseDBService):
                         due_date,
                         status
                     FROM payment_schedule
-                    WHERE room_number = %s AND payment_year = %s AND payment_month = %s
+                    WHERE {where_clause}
                     ORDER BY due_date
                     """,
-                    (room_number, year, month),
+                    params,
                 )
                 columns = [d[0] for d in cursor.description]
                 rows = cursor.fetchall()
@@ -374,7 +486,7 @@ class PaymentService(BaseDBService):
 
     def get_monthly_summary(self, year: int, month: int) -> Dict:
         """
-        本月摘要用的統計資料，對應 views.rent 中本月摘要指標。
+        本月摘要用的統計資料（自動過濾當前用戶）
 
         Returns:
             {
@@ -388,8 +500,21 @@ class PaymentService(BaseDBService):
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
+
+                # ✅ 自動添加 user_id 檢查
+                conditions = ["payment_year = %s", "payment_month = %s"]
+                params = [year, month]
+                
+                if not self.is_dev_mode():
+                    user_id = self._get_current_user_id()
+                    if user_id:
+                        conditions.append("user_id = %s")
+                        params.append(user_id)
+
+                where_clause = " AND ".join(conditions)
+
                 cursor.execute(
-                    """
+                    f"""
                     SELECT
                         COALESCE(SUM(amount), 0) AS total_expected,
                         COALESCE(
@@ -411,9 +536,9 @@ class PaymentService(BaseDBService):
                             0
                         ) AS overdue_count
                     FROM payment_schedule
-                    WHERE payment_year = %s AND payment_month = %s
+                    WHERE {where_clause}
                     """,
-                    (year, month),
+                    params,
                 )
                 row = cursor.fetchone()
                 total_expected, total_received, unpaid_count, overdue_count = row
@@ -448,7 +573,7 @@ class PaymentService(BaseDBService):
                 "collection_rate": 0.0,
             }
 
-    # ==================== 新增操作 ====================
+    # ==================== 新增操作（整合認證）====================
 
     def add_payment_schedule(
         self,
@@ -461,34 +586,53 @@ class PaymentService(BaseDBService):
         due_date: Optional[date] = None,
     ) -> Tuple[bool, str]:
         """
-        新增租金排程（低階 API，需自行提供金額／租客姓名等）
+        新增租金排程（自動注入 user_id）
         """
         try:
+            # ✅ 獲取當前用戶 ID
+            user_id = self._get_current_user_id()
+            
+            # 開發模式允許不登入
+            if not user_id and not self.is_dev_mode():
+                return False, "請先登入"
+
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
-                # 檢查是否已存在
+                # ✅ 檢查是否已存在（同時檢查 user_id）
+                check_conditions = [
+                    "room_number = %s",
+                    "payment_year = %s",
+                    "payment_month = %s"
+                ]
+                check_params = [room, year, month]
+                
+                if not self.is_dev_mode() and user_id:
+                    check_conditions.append("user_id = %s")
+                    check_params.append(user_id)
+
                 cursor.execute(
-                    """
+                    f"""
                     SELECT COUNT(*)
                     FROM payment_schedule
-                    WHERE room_number = %s AND payment_year = %s AND payment_month = %s
+                    WHERE {' AND '.join(check_conditions)}
                     """,
-                    (room, year, month),
+                    check_params,
                 )
 
                 if cursor.fetchone()[0] > 0:
                     logger.warning(f"{room} {year}/{month} 已有記錄")
                     return False, f"{year}/{month} {room} 已存在"
 
+                # ✅ 自動注入 user_id
                 cursor.execute(
                     """
                     INSERT INTO payment_schedule
-                    (room_number, tenant_name, payment_year, payment_month, amount,
+                    (user_id, room_number, tenant_name, payment_year, payment_month, amount,
                      paid_amount, payment_method, due_date, status)
-                    VALUES (%s, %s, %s, %s, %s, 0, %s, %s, 'unpaid')
+                    VALUES (%s, %s, %s, %s, %s, %s, 0, %s, %s, 'unpaid')
                     """,
-                    (room, tenant_name, year, month, amount, payment_method, due_date),
+                    (user_id, room, tenant_name, year, month, amount, payment_method, due_date),
                 )
 
                 log_db_operation("INSERT", "payment_schedule", True, 1)
@@ -509,21 +653,38 @@ class PaymentService(BaseDBService):
         month: int,
     ) -> Tuple[bool, str]:
         """
-        高階 API：依房號 + 年月，自動從 tenants 取 base_rent / tenant_name / payment_method 來建立租金排程。
-        對應 views.rent 批量建立排程使用。
+        高階 API：依房號 + 年月，自動從 tenants 取資料建立租金排程（自動注入 user_id）
         """
         try:
+            # ✅ 獲取當前用戶 ID
+            user_id = self._get_current_user_id()
+            
+            # 開發模式允許不登入
+            if not user_id and not self.is_dev_mode():
+                return False, "請先登入"
+
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
+                # ✅ 從 tenants 查詢時也要過濾 user_id
+                tenant_conditions = [
+                    "room_number = %s",
+                    "status = 'active'"
+                ]
+                tenant_params = [room_number]
+                
+                if not self.is_dev_mode() and user_id:
+                    tenant_conditions.append("user_id = %s")
+                    tenant_params.append(user_id)
+
                 # 1) 先確認有有效房客
                 cursor.execute(
-                    """
-                    SELECT tenant_name, base_rent, payment_method
+                    f"""
+                    SELECT name, rent_amount, payment_method
                     FROM tenants
-                    WHERE room_number = %s AND is_active = true
+                    WHERE {' AND '.join(tenant_conditions)}
                     """,
-                    (room_number,),
+                    tenant_params,
                 )
                 tenant = cursor.fetchone()
 
@@ -531,43 +692,54 @@ class PaymentService(BaseDBService):
                     logger.warning(f"房間 {room_number} 無有效房客，略過")
                     return False, f"房間 {room_number} 無有效房客"
 
-                tenant_name, base_rent, payment_method = tenant
+                tenant_name, rent_amount, payment_method = tenant
 
                 # 2) 檢查該年月是否已存在
+                check_conditions = [
+                    "room_number = %s",
+                    "payment_year = %s",
+                    "payment_month = %s"
+                ]
+                check_params = [room_number, year, month]
+                
+                if not self.is_dev_mode() and user_id:
+                    check_conditions.append("user_id = %s")
+                    check_params.append(user_id)
+
                 cursor.execute(
-                    """
+                    f"""
                     SELECT COUNT(*)
                     FROM payment_schedule
-                    WHERE room_number = %s AND payment_year = %s AND payment_month = %s
+                    WHERE {' AND '.join(check_conditions)}
                     """,
-                    (room_number, year, month),
+                    check_params,
                 )
                 if cursor.fetchone()[0] > 0:
                     logger.info(f"{room_number} {year}/{month} 已存在，略過")
                     return True, f"{room_number} {year}/{month} 已存在"
 
-                # 3) 設定預設到期日（預設 5 號，可日後改為設定值）
+                # 3) 設定預設到期日（預設 5 號）
                 try:
                     due = date(year, month, 5)
                 except Exception:
                     due = None
 
-                # 4) 插入記錄
+                # 4) 插入記錄，自動注入 user_id
                 cursor.execute(
                     """
                     INSERT INTO payment_schedule
-                    (room_number, tenant_name, payment_year, payment_month, amount,
+                    (user_id, room_number, tenant_name, payment_year, payment_month, amount,
                      paid_amount, payment_method, due_date, status)
-                    VALUES (%s, %s, %s, %s, %s, 0, %s, %s, 'unpaid')
+                    VALUES (%s, %s, %s, %s, %s, %s, 0, %s, %s, 'unpaid')
                     """,
-                    (room_number, tenant_name, year, month, base_rent, payment_method, due),
+                    (user_id, room_number, tenant_name, year, month, rent_amount, payment_method, due),
                 )
 
                 log_db_operation(
                     "INSERT", "payment_schedule (create_monthly)", True, 1
                 )
                 logger.info(
-                    f"建立排程: {room_number} {year}/{month} 金額 {base_rent:,.0f}"
+                    f"建立排程: {room_number} {year}/{month} 金額 {rent_amount:,.0f}"
                 )
                 return True, "新增成功"
 
@@ -582,7 +754,7 @@ class PaymentService(BaseDBService):
         self, schedules: List[Dict]
     ) -> Tuple[int, int, int]:
         """
-        批次建立租金排程（舊接口，保留給其他模組使用）
+        批次建立租金排程（自動注入 user_id）
 
         Args:
             schedules: 每個元素包含
@@ -597,22 +769,42 @@ class PaymentService(BaseDBService):
         fail_count = 0
 
         try:
+            # ✅ 獲取當前用戶 ID
+            user_id = self._get_current_user_id()
+            
+            # 開發模式允許不登入
+            if not user_id and not self.is_dev_mode():
+                logger.error("未登入，無法批次建立")
+                return 0, 0, len(schedules)
+
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
                 for schedule in schedules:
                     try:
+                        # 檢查是否已存在
+                        check_conditions = [
+                            "room_number = %s",
+                            "payment_year = %s",
+                            "payment_month = %s"
+                        ]
+                        check_params = [
+                            schedule["room_number"],
+                            schedule["payment_year"],
+                            schedule["payment_month"],
+                        ]
+                        
+                        if not self.is_dev_mode() and user_id:
+                            check_conditions.append("user_id = %s")
+                            check_params.append(user_id)
+
                         cursor.execute(
-                            """
+                            f"""
                             SELECT COUNT(*)
                             FROM payment_schedule
-                            WHERE room_number = %s AND payment_year = %s AND payment_month = %s
+                            WHERE {' AND '.join(check_conditions)}
                             """,
-                            (
-                                schedule["room_number"],
-                                schedule["payment_year"],
-                                schedule["payment_month"],
-                            ),
+                            check_params,
                         )
 
                         if cursor.fetchone()[0] > 0:
@@ -623,14 +815,16 @@ class PaymentService(BaseDBService):
                             skip_count += 1
                             continue
 
+                        # ✅ 自動注入 user_id
                         cursor.execute(
                             """
                             INSERT INTO payment_schedule
-                            (room_number, tenant_name, payment_year, payment_month,
+                            (user_id, room_number, tenant_name, payment_year, payment_month,
                              amount, paid_amount, payment_method, due_date, status)
-                            VALUES (%s, %s, %s, %s, %s, 0, %s, %s, 'unpaid')
+                            VALUES (%s, %s, %s, %s, %s, %s, 0, %s, %s, 'unpaid')
                             """,
                             (
+                                user_id,
                                 schedule["room_number"],
                                 schedule["tenant_name"],
                                 schedule["payment_year"],
@@ -664,52 +858,69 @@ class PaymentService(BaseDBService):
             logger.error(f"批量新增租金排程失敗: {str(e)}")
             return 0, 0, len(schedules)
 
-    # ==================== 更新操作 ====================
+    # ==================== 更新操作（整合認證）====================
 
     def mark_payment_done(
         self, payment_id: int, paid_amount: Optional[float] = None
     ) -> Tuple[bool, str]:
         """
-        將單筆租金標記為已繳款
+        將單筆租金標記為已繳款（自動驗證權限）
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
-                cursor.execute(
-                    "SELECT amount, room_number FROM payment_schedule WHERE id = %s",
-                    (payment_id,),
-                )
-                row = cursor.fetchone()
+                # ✅ 先驗證權限
+                payment = self.get_payment_by_id(payment_id)
+                if not payment:
+                    return False, f"租金記錄 ID {payment_id} 不存在或無權限"
 
-                if not row:
-                    return False, f"租金記錄 ID {payment_id} 不存在"
-
-                original_amount, room = row
+                original_amount = payment['amount']
+                room = payment['room_number']
                 actual_paid = paid_amount if paid_amount is not None else original_amount
 
+                # ✅ 自動添加 user_id 檢查
+                user_id_check = ""
+                params = []
+                
+                if not self.is_dev_mode():
+                    user_id = self._get_current_user_id()
+                    if user_id:
+                        user_id_check = "AND user_id = %s"
+
                 if paid_amount is not None:
+                    params = [paid_amount, payment_id]
+                    if user_id_check and user_id:
+                        params.append(user_id)
+                    
                     cursor.execute(
-                        """
+                        f"""
                         UPDATE payment_schedule
                         SET status = 'paid',
                             paid_amount = %s,
                             updated_at = NOW()
-                        WHERE id = %s
+                        WHERE id = %s {user_id_check}
                         """,
-                        (paid_amount, payment_id),
+                        params,
                     )
                 else:
+                    params = [payment_id]
+                    if user_id_check and user_id:
+                        params.append(user_id)
+                    
                     cursor.execute(
-                        """
+                        f"""
                         UPDATE payment_schedule
                         SET status = 'paid',
                             paid_amount = amount,
                             updated_at = NOW()
-                        WHERE id = %s
+                        WHERE id = %s {user_id_check}
                         """,
-                        (payment_id,),
+                        params,
                     )
+
+                if cursor.rowcount == 0:
+                    return False, f"租金記錄 ID {payment_id} 不存在或無權限"
 
                 log_db_operation("UPDATE", "payment_schedule", True, 1)
                 logger.info(
@@ -724,7 +935,7 @@ class PaymentService(BaseDBService):
 
     def batch_mark_paid(self, payment_ids: List[int]) -> Dict[str, int]:
         """
-        批次標記為已繳款
+        批次標記為已繳款（自動驗證權限）
 
         Returns:
             {"success": int, "failed": int}
@@ -733,18 +944,26 @@ class PaymentService(BaseDBService):
         fail_count = 0
 
         try:
+            # ✅ 自動添加 user_id 檢查
+            user_id_check = ""
+            
+            if not self.is_dev_mode():
+                user_id = self._get_current_user_id()
+                if user_id:
+                    user_id_check = f"AND user_id = '{user_id}'"
+
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
                 for payment_id in payment_ids:
                     try:
                         cursor.execute(
-                            """
+                            f"""
                             UPDATE payment_schedule
                             SET status = 'paid',
                                 paid_amount = amount,
                                 updated_at = NOW()
-                            WHERE id = %s
+                            WHERE id = %s {user_id_check}
                             """,
                             (payment_id,),
                         )
@@ -753,7 +972,7 @@ class PaymentService(BaseDBService):
                             success_count += 1
                         else:
                             fail_count += 1
-                            logger.warning(f"ID {payment_id} 不存在")
+                            logger.warning(f"ID {payment_id} 不存在或無權限")
 
                     except Exception as e:
                         logger.error(f"ID {payment_id} 標記失敗: {e}")
@@ -780,24 +999,34 @@ class PaymentService(BaseDBService):
         new_amount: float,
     ) -> Tuple[bool, str]:
         """
-        更新租金金額（僅限未繳款記錄）
+        更新租金金額（僅限未繳款記錄，自動驗證權限）
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
+                # ✅ 自動添加 user_id 檢查
+                user_id_check = ""
+                params = [new_amount, payment_id]
+                
+                if not self.is_dev_mode():
+                    user_id = self._get_current_user_id()
+                    if user_id:
+                        user_id_check = "AND user_id = %s"
+                        params.append(user_id)
+
                 cursor.execute(
-                    """
+                    f"""
                     UPDATE payment_schedule
                     SET amount = %s,
                         updated_at = NOW()
-                    WHERE id = %s AND status = 'unpaid'
+                    WHERE id = %s AND status = 'unpaid' {user_id_check}
                     """,
-                    (new_amount, payment_id),
+                    params,
                 )
 
                 if cursor.rowcount == 0:
-                    return False, "記錄不存在或已繳款"
+                    return False, "記錄不存在、已繳款或無權限"
 
                 log_db_operation("UPDATE", "payment_schedule", True, 1)
                 logger.info(
@@ -810,33 +1039,45 @@ class PaymentService(BaseDBService):
             logger.error(f"更新租金金額失敗: {str(e)}")
             return False, f"更新失敗: {str(e)[:100]}"
 
-    # ==================== 刪除操作 ====================
+    # ==================== 刪除操作（整合認證）====================
 
     def delete_payment_schedule(self, payment_id: int) -> Tuple[bool, str]:
         """
-        刪除租金排程
+        刪除租金排程（自動驗證權限）
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
+                # ✅ 自動添加 user_id 檢查
+                user_id_check = ""
+                params = [payment_id]
+                
+                if not self.is_dev_mode():
+                    user_id = self._get_current_user_id()
+                    if user_id:
+                        user_id_check = "AND user_id = %s"
+                        params.append(user_id)
+
+                # 檢查租金記錄是否存在
                 cursor.execute(
-                    """
+                    f"""
                     SELECT room_number, payment_year, payment_month
                     FROM payment_schedule
-                    WHERE id = %s
+                    WHERE id = %s {user_id_check}
                     """,
-                    (payment_id,),
+                    params,
                 )
 
                 row = cursor.fetchone()
                 if not row:
-                    return False, f"租金記錄 ID {payment_id} 不存在"
+                    return False, f"租金記錄 ID {payment_id} 不存在或無權限"
 
                 room, year, month = row
 
                 cursor.execute(
-                    "DELETE FROM payment_schedule WHERE id = %s", (payment_id,)
+                    f"DELETE FROM payment_schedule WHERE id = %s {user_id_check}",
+                    params
                 )
 
                 log_db_operation("DELETE", "payment_schedule", True, 1)
@@ -850,7 +1091,7 @@ class PaymentService(BaseDBService):
             logger.error(f"刪除租金排程失敗: {str(e)}")
             return False, f"刪除失敗: {str(e)[:100]}"
 
-    # ==================== 統計分析 ====================
+    # ==================== 統計分析（整合認證）====================
 
     def get_payment_statistics(
         self,
@@ -858,7 +1099,7 @@ class PaymentService(BaseDBService):
         month: Optional[int] = None,
     ) -> Dict:
         """
-        取得租金統計數據（保留給其他報表使用）
+        取得租金統計數據（自動過濾當前用戶）
         """
         try:
             with self.get_connection() as conn:
@@ -866,6 +1107,13 @@ class PaymentService(BaseDBService):
 
                 conditions = ["1=1"]
                 params: List = []
+
+                # ✅ 自動添加 user_id 過濾
+                if not self.is_dev_mode():
+                    user_id = self._get_current_user_id()
+                    if user_id:
+                        conditions.append("user_id = %s")
+                        params.append(user_id)
 
                 if year:
                     conditions.append("payment_year = %s")
@@ -952,13 +1200,24 @@ class PaymentService(BaseDBService):
 
     def get_payment_trends(self, year: int) -> List[Dict]:
         """
-        取得租金收款趨勢（按月彙總）
+        取得租金收款趨勢（按月彙總，自動過濾當前用戶）
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
+
+                # ✅ 自動添加 user_id 檢查
+                user_id_check = ""
+                params = [year]
+                
+                if not self.is_dev_mode():
+                    user_id = self._get_current_user_id()
+                    if user_id:
+                        user_id_check = "AND user_id = %s"
+                        params.append(user_id)
+
                 cursor.execute(
-                    """
+                    f"""
                     SELECT
                         payment_month,
                         SUM(amount) AS total_amount,
@@ -966,11 +1225,11 @@ class PaymentService(BaseDBService):
                         COUNT(*) AS total_count,
                         SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END) AS paid_count
                     FROM payment_schedule
-                    WHERE payment_year = %s
+                    WHERE payment_year = %s {user_id_check}
                     GROUP BY payment_month
                     ORDER BY payment_month
                     """,
-                    (year,),
+                    params,
                 )
 
                 trends: List[Dict] = []
@@ -1009,7 +1268,7 @@ class PaymentService(BaseDBService):
             logger.error(f"租金趨勢查詢失敗: {str(e)}")
             return []
 
-    # ==================== 歷史 / 輔助 ====================
+    # ==================== 歷史 / 輔助（整合認證）====================
 
     def get_room_payment_history(
         self,
@@ -1017,14 +1276,27 @@ class PaymentService(BaseDBService):
         limit: int = 12,
     ) -> List[Dict]:
         """
-        查詢特定房間的繳款歷史（最近 N 筆）
+        查詢特定房間的繳款歷史（自動過濾當前用戶）
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
+                # ✅ 自動添加 user_id 檢查
+                conditions = ["room_number = %s"]
+                params = [room_number]
+                
+                if not self.is_dev_mode():
+                    user_id = self._get_current_user_id()
+                    if user_id:
+                        conditions.append("user_id = %s")
+                        params.append(user_id)
+
+                params.append(limit)
+                where_clause = " AND ".join(conditions)
+
                 cursor.execute(
-                    """
+                    f"""
                     SELECT
                         payment_year,
                         payment_month,
@@ -1034,11 +1306,11 @@ class PaymentService(BaseDBService):
                         due_date,
                         updated_at
                     FROM payment_schedule
-                    WHERE room_number = %s
+                    WHERE {where_clause}
                     ORDER BY payment_year DESC, payment_month DESC
                     LIMIT %s
                     """,
-                    (room_number, limit),
+                    params,
                 )
 
                 columns = [desc[0] for desc in cursor.description]
@@ -1068,18 +1340,35 @@ class PaymentService(BaseDBService):
 
     def check_payment_exists(self, room: str, year: int, month: int) -> bool:
         """
-        檢查指定房號在某年/月是否已存在租金記錄
+        檢查指定房號在某年/月是否已存在租金記錄（自動過濾當前用戶）
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
+
+                # ✅ 自動添加 user_id 檢查
+                conditions = [
+                    "room_number = %s",
+                    "payment_year = %s",
+                    "payment_month = %s"
+                ]
+                params = [room, year, month]
+                
+                if not self.is_dev_mode():
+                    user_id = self._get_current_user_id()
+                    if user_id:
+                        conditions.append("user_id = %s")
+                        params.append(user_id)
+
+                where_clause = " AND ".join(conditions)
+
                 cursor.execute(
-                    """
+                    f"""
                     SELECT COUNT(*)
                     FROM payment_schedule
-                    WHERE room_number = %s AND payment_year = %s AND payment_month = %s
+                    WHERE {where_clause}
                     """,
-                    (room, year, month),
+                    params,
                 )
 
                 exists = cursor.fetchone()[0] > 0
@@ -1091,3 +1380,45 @@ class PaymentService(BaseDBService):
         except Exception as e:
             logger.error(f"檢查租金記錄是否存在失敗: {str(e)}")
             return False
+
+
+# ============================================
+# 本機測試
+# ============================================
+if __name__ == "__main__":
+    from datetime import date
+
+    service = PaymentService()
+
+    print("=== 測試租金服務 v5.0 (Auth) ===\n")
+
+    # 測試 0：認證狀態
+    print("0. 認證狀態:")
+    print(f"   已登入: {service.is_authenticated()}")
+    print(f"   開發模式: {service.is_dev_mode()}")
+    user_id = service._get_current_user_id()
+    print(f"   User ID: {user_id or '無'}\n")
+
+    # 測試 1：查詢所有租金
+    print("1. 所有租金記錄:")
+    payments = service.get_all_payments()
+    print(f"   共 {len(payments)} 筆記錄\n")
+
+    # 測試 2：查詢逾期
+    print("2. 逾期租金:")
+    overdue = service.get_overdue_payments()
+    print(f"   {len(overdue)} 筆逾期\n")
+
+    # 測試 3：本月摘要
+    print("3. 本月摘要 (2026/2):")
+    summary = service.get_monthly_summary(2026, 2)
+    for key, value in summary.items():
+        print(f"   {key}: {value}")
+
+    # 測試 4：統計
+    print("\n4. 租金統計:")
+    stats = service.get_payment_statistics()
+    for key, value in stats.items():
+        print(f"   {key}: {value}")
+
+    print("\n✅ 測試完成")
