@@ -1,8 +1,10 @@
 """
-房客管理 - v4.0 (Pydantic + Service 架構)
+房客管理 - v5.0 (Pydantic + Service 架構 + Auth)
+✅ 整合認證系統
+✅ 登入保護
 ✅ 整合 Pydantic 驗證層
 ✅ 完全移除 db 依賴
-✅ 使用 TenantService
+✅ 使用 TenantService v5.0
 ✅ 完整表單驗證
 ✅ 租約衝突檢查
 ✅ 刪除確認優化
@@ -14,6 +16,15 @@ from datetime import date, datetime
 from typing import Optional, Tuple
 import logging
 from pydantic import ValidationError
+
+# ✅ 導入認證管理
+try:
+    from utils.session_manager import session_manager
+    HAS_SESSION_MANAGER = True
+except ImportError:
+    HAS_SESSION_MANAGER = False
+    import warnings
+    warnings.warn("⚠️ session_manager 未載入，認證功能將受限")
 
 # ✅ 導入 Pydantic Schemas
 from schemas.tenant import TenantCreate, TenantUpdate
@@ -40,6 +51,33 @@ except ImportError:
         st.dataframe(df, use_container_width=True, key=key, hide_index=True)
 
 logger = logging.getLogger(__name__)
+
+
+# ============== 認證檢查 ==============
+
+def check_authentication() -> bool:
+    """
+    檢查用戶是否已登入
+    
+    Returns:
+        bool: True=已登入, False=未登入
+    """
+    if not HAS_SESSION_MANAGER:
+        # 如果沒有 session_manager，檢查開發模式
+        return st.secrets.get("dev_mode", False)
+    
+    return session_manager.is_authenticated()
+
+
+def render_login_required():
+    """渲染登入提示頁面"""
+    st.warning("🔒 此頁面需要登入才能使用")
+    st.info("👉 請先前往「登入」頁面完成登入")
+    
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col2:
+        if st.button("🔑 前往登入", use_container_width=True, type="primary"):
+            st.switch_page("pages/login.py")
 
 
 # ============== 輔助函數 ==============
@@ -648,15 +686,40 @@ def render_stats_tab(tenant_service: TenantService):
         logger.error(f"載入統計資訊失敗: {str(e)}", exc_info=True)
 
 
-# ============== 主函數 ==============
+# ============== 主函數（整合認證）==============
 
 def render():
     """主渲染函數（供 main.py 動態載入使用）"""
+    
+    # ✅ 認證檢查
+    if not check_authentication():
+        render_login_required()
+        return
+    
     st.title("👥 房客管理")
     
-    # ✅ 初始化 Service
-    tenant_service = TenantService()
+    # ✅ 顯示當前用戶資訊（可選）
+    if HAS_SESSION_MANAGER:
+        user_info = session_manager.get_user_info()
+        if user_info:
+            with st.sidebar:
+                st.caption(f"👤 {user_info.get('email', '未知用戶')}")
     
+    # ✅ 初始化 Service
+    try:
+        tenant_service = TenantService()
+        
+        # 健康檢查
+        if not tenant_service.health_check():
+            st.error("❌ 資料庫連接失敗，請稍後再試")
+            return
+    
+    except Exception as e:
+        st.error(f"❌ 初始化服務失敗: {str(e)}")
+        logger.error(f"初始化 TenantService 失敗: {str(e)}", exc_info=True)
+        return
+    
+    # ✅ 渲染 Tabs
     tab1, tab2, tab3, tab4 = st.tabs(["➕ 新增房客", "📋 房客列表", "✏️ 編輯房客", "📊 統計資訊"])
     
     with tab1:
