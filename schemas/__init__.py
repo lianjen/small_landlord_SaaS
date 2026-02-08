@@ -7,7 +7,8 @@ from .tenant import (
     TenantCreate,
     TenantUpdate,
     TenantResponse,
-    TenantListItem
+    TenantListItem,
+    TenantSearchResult
 )
 
 from .payment import (
@@ -15,7 +16,19 @@ from .payment import (
     PaymentCreate,
     PaymentUpdate,
     PaymentResponse,
-    PaymentSummary
+    PaymentListItem,
+    PaymentSummary,
+    PaymentMarkPaid
+)
+
+from .expense import (
+    ExpenseBase,
+    ExpenseCreate,
+    ExpenseUpdate,
+    ExpenseResponse,
+    ExpenseListItem,
+    ExpenseSummary,
+    ExpenseFilter
 )
 
 __all__ = [
@@ -25,11 +38,23 @@ __all__ = [
     "TenantUpdate",
     "TenantResponse",
     "TenantListItem",
+    "TenantSearchResult",
     
     # Payment schemas
     "PaymentBase",
     "PaymentCreate",
     "PaymentUpdate",
     "PaymentResponse",
+    "PaymentListItem",
     "PaymentSummary",
+    "PaymentMarkPaid",
+    
+    # Expense schemas
+    "ExpenseBase",
+    "ExpenseCreate",
+    "ExpenseUpdate",
+    "ExpenseResponse",
+    "ExpenseListItem",
+    "ExpenseSummary",
+    "ExpenseFilter",
 ]
