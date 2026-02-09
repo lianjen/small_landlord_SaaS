@@ -1,5 +1,5 @@
 """
-租客管理服務 - v5.1 (修正欄位名稱)
+租客管理服務 - v5.2 (移除 rent_due_day)
 ✅ 整合 Pydantic 驗證層
 ✅ 自動注入 user_id
 ✅ RLS Policy 兼容
@@ -13,6 +13,7 @@
 ✅ 完全適配 Supabase
 ✅ 向後兼容
 ✅ 欄位名稱已統一 (lease_start/end, rent, deposit)
+✅ 已移除 rent_due_day 欄位
 """
 
 import pandas as pd
@@ -100,7 +101,7 @@ class TenantService(BaseDBService):
                     f"""
                     SELECT 
                         id, room_number, name, phone, email, id_number,
-                        deposit, rent, rent_due_day,
+                        deposit, rent,
                         lease_start, lease_end, status, notes,
                         created_at, updated_at
                     FROM tenants
@@ -209,7 +210,7 @@ class TenantService(BaseDBService):
                     f"""
                     SELECT 
                         id, room_number, name, phone, email, id_number,
-                        deposit, rent, rent_due_day,
+                        deposit, rent,
                         lease_start, lease_end, status, notes,
                         created_at, updated_at
                     FROM tenants
@@ -258,7 +259,7 @@ class TenantService(BaseDBService):
                     f"""
                     SELECT 
                         id, room_number, name, phone, email, id_number,
-                        deposit, rent, rent_due_day,
+                        deposit, rent,
                         lease_start, lease_end, status, notes,
                         created_at, updated_at
                     FROM tenants
@@ -302,7 +303,6 @@ class TenantService(BaseDBService):
         # ✅ 新增 Pydantic 支援的欄位
         email: str = None,
         id_number: str = None,
-        rent_due_day: int = 5,
         notes: str = None,
     ) -> Tuple[bool, str]:
         """
@@ -366,7 +366,6 @@ class TenantService(BaseDBService):
                     "email": email,
                     "id_number": id_number,
                     "rent": base_rent or deposit or 0,  # ✅ 新欄位名
-                    "rent_due_day": rent_due_day,
                     "deposit": deposit or 0,  # ✅ 新欄位名
                     "lease_start": start,  # ✅ 新欄位名
                     "lease_end": end,  # ✅ 新欄位名
@@ -404,9 +403,9 @@ class TenantService(BaseDBService):
                     """
                     INSERT INTO tenants 
                     (user_id, room_number, name, phone, email, id_number,
-                     rent, rent_due_day, deposit,
+                     rent, deposit,
                      lease_start, lease_end, status, notes)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                 """,
                     (
@@ -417,7 +416,6 @@ class TenantService(BaseDBService):
                         validated_data.get('email'),
                         validated_data.get('id_number'),
                         validated_data['rent'],  # ✅ 新欄位名
-                        validated_data.get('rent_due_day', 5),
                         validated_data['deposit'],  # ✅ 新欄位名
                         validated_data['lease_start'],  # ✅ 新欄位名
                         validated_data.get('lease_end'),  # ✅ 新欄位名
@@ -500,7 +498,6 @@ class TenantService(BaseDBService):
         # ✅ 新增 Pydantic 支援的欄位
         email: str = None,
         id_number: str = None,
-        rent_due_day: int = None,
         notes: str = None,
         status: str = None,
     ) -> Tuple[bool, str]:
@@ -570,8 +567,6 @@ class TenantService(BaseDBService):
                     data_dict["id_number"] = id_number
                 if base_rent is not None:
                     data_dict["rent"] = base_rent  # ✅ 新欄位名
-                if rent_due_day is not None:
-                    data_dict["rent_due_day"] = rent_due_day
                 if deposit is not None:
                     data_dict["deposit"] = deposit  # ✅ 新欄位名
                 if start is not None:
@@ -1053,7 +1048,7 @@ if __name__ == "__main__":
     
     service = TenantService()
 
-    print("=== 測試房客服務 v5.1 (欄位名稱已統一) ===\n")
+    print("=== 測試房客服務 v5.2 (已移除 rent_due_day) ===\n")
 
     # 測試 0：認證狀態
     print("0. 認證狀態:")
