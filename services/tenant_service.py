@@ -1,5 +1,6 @@
 """
-租客管理服務 - v5.2 (移除 rent_due_day)
+租客管理服務 - v5.3 (強制重新載入)
+⚡ FORCE RELOAD: 2026-02-09-14:15
 ✅ 整合 Pydantic 驗證層
 ✅ 自動注入 user_id
 ✅ RLS Policy 兼容
@@ -1048,7 +1049,7 @@ if __name__ == "__main__":
     
     service = TenantService()
 
-    print("=== 測試房客服務 v5.2 (已移除 rent_due_day) ===\n")
+    print("=== 測試房客服務 v5.3 (強制重新載入) ===\n")
 
     # 測試 0：認證狀態
     print("0. 認證狀態:")
