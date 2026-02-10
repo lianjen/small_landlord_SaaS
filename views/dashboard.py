@@ -1,517 +1,156 @@
 """
-儀表板 - 重構版 v3.1 (Supabase Compatible)
-特性:
-- ✅ 使用 Service 架構
-- ✅ 修復 DataFrame 布林判斷錯誤
-- ✅ 修復 f-string 反斜線錯誤
-- ✅ 錯誤邊界處理
-- ✅ 效能優化 (快取)
-- ✅ 動態房間數
-- ✅ 統一日期處理
-- ✅ 完全適配 Supabase 欄位結構
+儀表板 (Dashboard) - MicroRent Edition
+現代化卡片式設計，以物件為核心視角
 """
-
 import streamlit as st
-import pandas as pd
-from datetime import datetime, timedelta, date
-from typing import List, Dict, Optional
-import logging
-
-from components.cards import (
-    section_header, metric_card, room_status_card, 
-    empty_state, info_card, status_badge
-)
-from config.constants import ROOMS, UI
-
-# ✅ 使用 Service 架構
-from services.tenant_service import TenantService
+from services.property_service import PropertyService
 from services.payment_service import PaymentService
-from services.base_db import BaseDBService
+from services.session_manager import session_manager
+import pandas as pd
+from typing import Dict, Any
 
-logger = logging.getLogger(__name__)
+def render():
+    st.title("📊 儀表板")
+    st.caption("MicroRent - 您的智慧租屋管家")
 
+    # 初始化服務
+    property_service = PropertyService()
+    payment_service = PaymentService()
+    user_id = session_manager.get_user_id()
 
-class DashboardService(BaseDBService):
-    """儀表板專用 Service"""
+    if not user_id:
+        st.warning("請先登入")
+        return
+
+    # 1. 頂部 KPI 卡片 (全域統計)
+    render_global_kpi(property_service, payment_service, user_id)
+
+    st.divider()
+
+    # 2. 物件概況 (Properties Overview)
+    st.subheader("🏢 物件概況")
     
-    def get_memos(self, include_completed: bool = False) -> List[Dict]:
-        """取得備忘錄"""
-        try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor()
-                
-                if include_completed:
-                    cursor.execute("""
-                        SELECT id, memo_text, priority, is_completed, created_at
-                        FROM memos
-                        ORDER BY 
-                            CASE priority 
-                                WHEN 'urgent' THEN 1 
-                                WHEN 'high' THEN 2 
-                                ELSE 3 
-                            END,
-                            created_at DESC
-                    """)
-                else:
-                    cursor.execute("""
-                        SELECT id, memo_text, priority, is_completed, created_at
-                        FROM memos
-                        WHERE is_completed = false
-                        ORDER BY 
-                            CASE priority 
-                                WHEN 'urgent' THEN 1 
-                                WHEN 'high' THEN 2 
-                                ELSE 3 
-                            END,
-                            created_at DESC
-                    """)
-                
-                columns = [desc[0] for desc in cursor.description]
-                rows = cursor.fetchall()
-                
-                return [dict(zip(columns, row)) for row in rows]
-        
-        except Exception as e:
-            st.error(f"❌ 查詢備忘錄失敗: {str(e)}")
-            logger.error(f"查詢備忘錄失敗: {str(e)}", exc_info=True)
-            return []
+    properties = property_service.get_properties_with_stats(user_id)
     
-    def add_memo(self, memo_text: str, priority: str = 'normal') -> bool:
-        """新增備忘錄"""
-        try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor()
-                
-                cursor.execute("""
-                    INSERT INTO memos (memo_text, priority)
-                    VALUES (%s, %s)
-                """, (memo_text, priority))
-                
-                conn.commit()
-                return True
-        
-        except Exception as e:
-            st.error(f"❌ 新增備忘錄失敗: {str(e)}")
-            logger.error(f"新增備忘錄失敗: {str(e)}", exc_info=True)
-            return False
+    if not properties:
+        st.info("👋 歡迎使用 MicroRent！請先前往「物件管理」建立您的第一棟房源。")
+        if st.button("🚀 立即建立物件", type="primary"):
+            st.session_state["current_menu"] = "🏢 物件管理"
+            st.rerun()
+        return
+
+    # 渲染物件卡片
+    for prop in properties:
+        render_property_dashboard_card(prop)
+
+    st.divider()
+
+    # 3. 待辦事項與通知 (簡易版)
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        st.subheader("📝 待辦事項")
+        st.info("✅ 目前沒有緊急待辦事項 (功能開發中)")
     
-    def complete_memo(self, memo_id: int) -> bool:
-        """完成備忘錄"""
-        try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor()
-                
-                cursor.execute("""
-                    UPDATE memos
-                    SET is_completed = true, completed_at = NOW()
-                    WHERE id = %s
-                """, (memo_id,))
-                
-                conn.commit()
-                return True
-        
-        except Exception as e:
-            st.error(f"❌ 完成備忘錄失敗: {str(e)}")
-            logger.error(f"完成備忘錄失敗: {str(e)}", exc_info=True)
-            return False
+    with col2:
+        st.subheader("🔔 最新通知")
+        st.caption("暫無新通知")
 
 
-def safe_parse_date(date_value) -> Optional[date]:
-    """
-    安全解析日期
+def render_global_kpi(property_service, payment_service, user_id):
+    """渲染全域 KPI 指標列"""
     
-    Args:
-        date_value: 日期值 (可能是 str, date, datetime, None)
+    # 這裡未來可以用 AnalyticsService 優化效能
+    properties = property_service.get_properties_with_stats(user_id)
     
-    Returns:
-        date 物件或 None
-    """
-    if date_value is None:
-        return None
+    total_rooms = sum(p.total_rooms for p in properties)
+    occupied_rooms = sum(p.occupied_rooms for p in properties)
+    vacant_rooms = total_rooms - occupied_rooms
+    occupancy_rate = (occupied_rooms / total_rooms * 100) if total_rooms > 0 else 0
     
-    if isinstance(date_value, date):
-        return date_value
-    
-    if isinstance(date_value, datetime):
-        return date_value.date()
-    
-    try:
-        return datetime.strptime(str(date_value), "%Y-%m-%d").date()
-    except (ValueError, TypeError):
-        return None
-
-
-def safe_to_dataframe(data) -> pd.DataFrame:
-    """
-    安全地將資料轉換為 DataFrame
-    
-    Args:
-        data: 可能是 DataFrame, List, Dict 或 None
-    
-    Returns:
-        pd.DataFrame
-    """
-    if isinstance(data, pd.DataFrame):
-        return data if not data.empty else pd.DataFrame()
-    elif isinstance(data, list):
-        return pd.DataFrame(data) if data else pd.DataFrame()
-    elif isinstance(data, dict):
-        return pd.DataFrame([data]) if data else pd.DataFrame()
-    else:
-        return pd.DataFrame()
-
-
-@st.cache_data(ttl=300)  # 快取 5 分鐘
-def calculate_metrics(df_tenants: pd.DataFrame, df_overdue: pd.DataFrame) -> Dict:
-    """
-    計算關鍵指標
-    
-    Args:
-        df_tenants: 房客資料
-        df_overdue: 逾期資料
-    
-    Returns:
-        指標字典
-    """
-    total_rooms = len(ROOMS.ALL_ROOMS)
-    
-    # ✅ 安全處理 DataFrame
-    occupied = len(df_tenants) if isinstance(df_tenants, pd.DataFrame) and not df_tenants.empty else 0
-    vacant = total_rooms - occupied
-    occupancy_rate = round((occupied / total_rooms) * 100, 1) if total_rooms > 0 else 0
-    
-    # ✅ 計算逾期金額（安全處理）
-    if isinstance(df_overdue, pd.DataFrame) and not df_overdue.empty and 'amount' in df_overdue.columns:
-        overdue_amount = df_overdue['amount'].sum()
-        overdue_count = len(df_overdue)
-    else:
-        overdue_amount = 0
-        overdue_count = 0
-    
-    return {
-        'total_rooms': total_rooms,
-        'occupied': occupied,
-        'vacant': vacant,
-        'occupancy_rate': occupancy_rate,
-        'overdue_amount': int(overdue_amount),
-        'overdue_count': overdue_count
-    }
-
-
-def get_expiring_leases(df_tenants: pd.DataFrame, days: int = 45) -> List[Dict]:
-    """
-    取得即將到期的租約
-    
-    Args:
-        df_tenants: 房客資料
-        days: 提前幾天警示
-    
-    Returns:
-        即將到期的租約列表
-    """
-    # ✅ 安全檢查
-    if not isinstance(df_tenants, pd.DataFrame) or df_tenants.empty:
-        return []
-    
-    expiring = []
-    today = date.today()
-    warning_date = today + timedelta(days=days)
-    
-    for _, tenant in df_tenants.iterrows():
-        # ✅ 修正：lease_end → move_out_date
-        lease_end = safe_parse_date(tenant.get('move_out_date'))
-        
-        if lease_end and today <= lease_end <= warning_date:
-            days_left = (lease_end - today).days
-            expiring.append({
-                'room': tenant['room_number'],
-                'tenant': tenant['name'],  # ✅ 修正：tenant_name → name
-                'lease_end': lease_end,
-                'days_left': days_left
-            })
-    
-    return sorted(expiring, key=lambda x: x['days_left'])
-
-
-def render_kpi_section(metrics: Dict):
-    """渲染 KPI 區塊"""
-    section_header("📊 關鍵指標", divider=True)
+    # TODO: 整合 PaymentService 取得真實金額
+    # 目前先用模擬數據或暫時顯示 0
+    total_expected_income = sum((p.monthly_income or 0) for p in properties)
+    actual_income = 0  # 需實作 PaymentService 統計
     
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        metric_card(
-            "佔用率",
-            f"{metrics['occupancy_rate']}%",
-            f"{metrics['occupied']}/{metrics['total_rooms']} 房",
-            "🏠",
-            "success" if metrics['occupancy_rate'] >= 80 else "warning"
+        st.metric(
+            "總收入 (本月)", 
+            f"${actual_income:,.0f}", 
+            delta=f"目標 ${total_expected_income:,.0f}",
+            delta_color="normal"
         )
     
     with col2:
-        metric_card(
-            "空房數",
-            str(metrics['vacant']),
-            "可出租",
-            "🔓",
-            "normal" if metrics['vacant'] > 0 else "success"
+        st.metric(
+            "總出租率", 
+            f"{occupancy_rate:.1f}%", 
+            delta=f"{occupied_rooms}/{total_rooms} 房"
         )
     
     with col3:
-        color = "error" if metrics['overdue_count'] > 0 else "success"
-        metric_card(
-            "逾期未繳",
-            str(metrics['overdue_count']),
-            f"金額: ${metrics['overdue_amount']:,}",
-            "⚠️",
-            color
+        # TODO: 取得真實逾期數
+        overdue_count = 0 
+        st.metric(
+            "逾期未繳", 
+            f"{overdue_count} 筆", 
+            delta="需立即處理" if overdue_count > 0 else "狀況良好",
+            delta_color="inverse"
         )
     
     with col4:
-        metric_card(
-            "總房間數",
-            str(metrics['total_rooms']),
-            "管理中",
-            "🏢",
-            "normal"
-        )
+        st.metric("空房數", f"{vacant_rooms} 間", delta="可招租")
 
 
-def render_lease_alerts(expiring_leases: List[Dict]):
-    """渲染租約警示"""
-    section_header("⏰ 租約到期警示", divider=True)
-    
-    if not expiring_leases:
-        info_card(
-            "✅ 無即將到期租約",
-            "45 天內沒有租約到期，一切正常！",
-            "✅",
-            "success"
-        )
-        return
-    
-    # 分類警示
-    urgent = [l for l in expiring_leases if l['days_left'] <= 14]
-    warning = [l for l in expiring_leases if 14 < l['days_left'] <= 30]
-    notice = [l for l in expiring_leases if l['days_left'] > 30]
-    
-    if urgent:
-        st.error(f"🚨 緊急: {len(urgent)} 個租約 14 天內到期")
-        for lease in urgent:
-            # ✅ 修復：先建立字串，再用 f-string
-            days_text = f"{lease['days_left']} 天"
-            st.markdown(
-                f"**{lease['room']}** - {lease['tenant']} | "
-                f"到期日: {lease['lease_end']} | "
-                f"{status_badge(days_text, 'error')}",
-                unsafe_allow_html=True
-            )
-    
-    if warning:
-        st.warning(f"⚠️ 注意: {len(warning)} 個租約 30 天內到期")
-        for lease in warning:
-            # ✅ 修復：先建立字串，再用 f-string
-            days_text = f"{lease['days_left']} 天"
-            st.markdown(
-                f"**{lease['room']}** - {lease['tenant']} | "
-                f"到期日: {lease['lease_end']} | "
-                f"{status_badge(days_text, 'warning')}",
-                unsafe_allow_html=True
-            )
-    
-    if notice:
-        st.info(f"ℹ️ 提醒: {len(notice)} 個租約 45 天內到期")
-        with st.expander("查看詳情"):
-            for lease in notice:
-                # ✅ 修復：先建立字串，再用 f-string
-                days_text = f"{lease['days_left']} 天"
-                st.markdown(
-                    f"**{lease['room']}** - {lease['tenant']} | "
-                    f"到期日: {lease['lease_end']} | "
-                    f"{status_badge(days_text, 'info')}",
-                    unsafe_allow_html=True
-                )
+def render_property_dashboard_card(prop):
+    """
+    渲染單一物件的儀表板卡片
+    顯示：出租率進度條、財務摘要、快速操作
+    """
+    with st.container():
+        # 自定義 CSS 樣式讓它看起來像卡片
+        st.markdown(f"""
+        <div style="
+            padding: 1.5rem; 
+            border-radius: 12px; 
+            border: 1px solid #e0e0e0; 
+            background-color: white; 
+            margin-bottom: 1rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+            <div style="display: flex; justify_content: space-between; align_items: center; margin-bottom: 10px;">
+                <h3 style="margin: 0; color: #333;">🏢 {prop.name}</h3>
+                <span style="background-color: #f3f4f6; padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; color: #666;">
+                    {prop.city} {prop.district}
+                </span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
-
-def render_room_status(df_tenants: pd.DataFrame):
-    """渲染房間狀態"""
-    section_header("🏠 房間狀態一覽", divider=True)
-    
-    # 建立房間狀態字典
-    room_status = {}
-    today = date.today()
-    warning_date = today + timedelta(days=45)
-    
-    # ✅ 安全處理 DataFrame
-    if isinstance(df_tenants, pd.DataFrame) and not df_tenants.empty:
-        for _, tenant in df_tenants.iterrows():
-            room = tenant['room_number']
-            # ✅ 修正：lease_end → move_out_date
-            lease_end = safe_parse_date(tenant.get('move_out_date'))
+        col1, col2, col3 = st.columns([2, 1, 1])
+        
+        with col1:
+            # 出租率進度條
+            occupancy = prop.occupancy_rate or 0.0
+            st.progress(occupancy, text=f"出租率 {occupancy*100:.0f}% ({prop.occupied_rooms}/{prop.total_rooms})")
             
-            # 判斷狀態
-            if lease_end and lease_end <= warning_date:
-                status = 'warning'
-            else:
-                status = 'occupied'
-            
-            room_status[room] = {
-                'tenant': tenant['name'],  # ✅ 修正：tenant_name → name
-                'status': status,
-                'rent': tenant.get('rent_amount', 0)  # ✅ 修正：base_rent → rent_amount
-            }
-    
-    # 渲染房間卡片 (每行 3 個)
-    rows = [ROOMS.ALL_ROOMS[i:i+3] for i in range(0, len(ROOMS.ALL_ROOMS), 3)]
-    
-    for row_rooms in rows:
-        cols = st.columns(3)
-        for col, room in zip(cols, row_rooms):
-            with col:
-                room_info = room_status.get(room)
-                
-                if room_info:
-                    room_status_card(
-                        room,
-                        room_info['tenant'],
-                        room_info['status'],
-                        room_info['rent']
-                    )
-                else:
-                    room_status_card(room, None, 'vacant')
+            # 房間狀態微型燈號 (這裡簡化顯示)
+            st.caption(f"空房: {prop.vacant_rooms} | 已租: {prop.occupied_rooms}")
 
+        with col2:
+            income = prop.monthly_income or 0
+            st.metric("本月預收", f"${income:,.0f}")
 
-def render_memo_section(dashboard_service: DashboardService):
-    """渲染備忘錄區塊"""
-    section_header("📝 待辦事項", divider=True)
-    
-    # 取得備忘錄
-    memos = dashboard_service.get_memos(include_completed=False)
-    
-    col1, col2 = st.columns([3, 1])
-    
-    with col1:
-        new_memo = st.text_input(
-            "新增待辦",
-            placeholder="例如: 清洗冷氣 4A、檢查熱水器...",
-            key="new_memo_input"
-        )
-    
-    with col2:
-        priority = st.selectbox(
-            "優先級",
-            ["normal", "high", "urgent"],
-            format_func=lambda x: {"normal": "普通", "high": "重要", "urgent": "緊急"}[x],
-            key="memo_priority"
-        )
-    
-    if st.button("➕ 新增", key="add_memo_btn", use_container_width=True):
-        if new_memo.strip():
-            if dashboard_service.add_memo(new_memo, priority):
-                st.success("✅ 已新增待辦事項")
+        with col3:
+            # 快速操作按鈕
+            if st.button("管理房間", key=f"manage_{prop.id}", use_container_width=True):
+                st.session_state["current_menu"] = "🚪 房間管理"
+                # TODO: 傳遞 default_property_id
                 st.rerun()
-            else:
-                st.error("❌ 新增失敗")
-        else:
-            st.warning("⚠️ 請輸入待辦內容")
-    
-    st.divider()
-    
-    # 顯示待辦列表
-    if not memos:
-        empty_state(
-            "目前沒有待辦事項",
-            "✨",
-            "一切都處理完畢了！"
-        )
-    else:
-        for memo in memos:
-            col1, col2, col3 = st.columns([1, 6, 1])
             
-            with col1:
-                priority_emoji = {
-                    'urgent': '🔴',
-                    'high': '🟡',
-                    'normal': '⚪'
-                }
-                st.write(priority_emoji.get(memo['priority'], '⚪'))
-            
-            with col2:
-                st.write(memo['memo_text'])
-                st.caption(f"建立於: {memo['created_at']}")
-            
-            with col3:
-                if st.button("✅", key=f"complete_{memo['id']}"):
-                    if dashboard_service.complete_memo(memo['id']):
-                        st.success("✅ 已完成")
-                        st.rerun()
+            if st.button("新增房客", key=f"add_tenant_{prop.id}", use_container_width=True):
+                st.session_state["current_menu"] = "👥 房客管理"
+                st.rerun()
 
-
-def render():
-    """主渲染函數（供 main.py 動態載入使用）"""
-    st.title(f"{UI.PAGE_ICON} 儀表板")
-    
-    # ✅ 初始化 Services
-    tenant_service = TenantService()
-    payment_service = PaymentService()
-    dashboard_service = DashboardService()
-    
-    # 載入資料
-    with st.spinner("載入資料中..."):
-        try:
-            # ✅ 使用 Service 方法取得資料
-            tenants = tenant_service.get_all_tenants()
-            overdue = payment_service.get_overdue_payments()
-            
-            # ✅ 安全轉換為 DataFrame
-            df_tenants = safe_to_dataframe(tenants)
-            df_overdue = safe_to_dataframe(overdue)
-            
-            logger.info(f"✅ 資料載入成功: 房客 {len(df_tenants)}，逾期 {len(df_overdue)}")
-        
-        except Exception as e:
-            st.error(f"❌ 資料載入失敗: {str(e)}")
-            logger.error(f"資料載入失敗: {str(e)}", exc_info=True)
-            return
-    
-    # 計算指標
-    try:
-        metrics = calculate_metrics(df_tenants, df_overdue)
-    except Exception as e:
-        st.error(f"❌ 指標計算失敗: {str(e)}")
-        logger.error(f"指標計算失敗: {str(e)}", exc_info=True)
-        return
-    
-    # 渲染各區塊
-    try:
-        render_kpi_section(metrics)
-        
-        st.divider()
-        
-        # 租約警示
-        expiring_leases = get_expiring_leases(df_tenants)
-        render_lease_alerts(expiring_leases)
-        
-        st.divider()
-        
-        # 房間狀態
-        render_room_status(df_tenants)
-        
-        st.divider()
-        
-        # 備忘錄
-        render_memo_section(dashboard_service)
-    
-    except Exception as e:
-        st.error(f"❌ 渲染失敗: {str(e)}")
-        logger.error(f"渲染失敗: {str(e)}", exc_info=True)
-
-
-# ✅ Streamlit 頁面入口
 def show():
-    """Streamlit 頁面入口"""
     render()
-
-
-if __name__ == "__main__":
-    show()

@@ -430,11 +430,12 @@ def render_menu() -> str:
         "🚪 房間管理",
         "👥 房客管理",
         "💰 租金管理",
+        "⏰ 自動催繳",    # New
+        "🤖 LINE 設定",    # New
         "📋 繳費追蹤",
         "⚡ 電費管理",
         "💸 支出記錄",
-        "📱 LINE 綁定",
-        "📬 通知管理",
+        # "📬 通知管理",   # Merge into Auto Reminders or keep as log view
     ]
     
     # ✅ Admin 專屬功能
@@ -507,6 +508,12 @@ def render_system_status(db_healthy: bool) -> None:
 
 def render_main_content() -> None:
     """渲染主內容區域"""
+    # ✅ 檢查 URL 參數是否為房客模式
+    query_params = st.query_params
+    if query_params.get("role") == "tenant":
+        load_page_module("tenant_portal", "🏠 房客專區")
+        return
+
     menu = st.session_state.get("current_menu", "📊 儀表板")
     
     # ✅ 權限檢查
@@ -523,6 +530,8 @@ def render_main_content() -> None:
         "🚪 房間管理": "rooms",
         "👥 房客管理": "tenants",
         "💰 租金管理": "rent",
+        "⏰ 自動催繳": "auto_reminders", # New
+        "🤖 LINE 設定": "line_settings",   # New
         "📋 繳費追蹤": "tracking",
         "⚡ 電費管理": "electricity",
         "💸 支出記錄": "expenses",
