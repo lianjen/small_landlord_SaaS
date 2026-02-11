@@ -365,7 +365,7 @@ class BaseDBService:
             # 方法 1：使用 SessionManager（推薦）
             if HAS_STREAMLIT:
                 try:
-                    from utils.session_manager import session_manager
+                    from services.session_manager import session_manager
                     user_id = session_manager.get_user_id()
                     if user_id:
                         return user_id

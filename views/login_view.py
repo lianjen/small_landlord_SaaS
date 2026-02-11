@@ -10,7 +10,7 @@
 """
 import streamlit as st
 from services.auth_service import AuthService
-from utils.session_manager import session_manager
+from services.session_manager import session_manager
 import re
 from typing import Optional
 

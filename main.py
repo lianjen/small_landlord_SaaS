@@ -137,7 +137,7 @@ load_css(css_path)
 # ============================================
 
 try:
-    from utils.session_manager import session_manager  # ✅ 修正路径
+    from services.session_manager import session_manager  # ✅ 修正路径
     from services.auth_service import AuthService
     logger.info("✅ Session Manager 和 Auth Service 載入成功")
 except ImportError as e:

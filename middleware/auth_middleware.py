@@ -11,7 +11,7 @@ import logging
 from functools import wraps
 
 from services.auth_service import AuthService
-from utils.session_manager import SessionManager
+from services.session_manager import session_manager
 
 logger = logging.getLogger(__name__)
 
