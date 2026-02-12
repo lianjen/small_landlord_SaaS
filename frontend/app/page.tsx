@@ -1,4 +1,4 @@
-```javascript
+
 "use client";
 
 import Link from "next/link";
@@ -78,7 +78,7 @@ export default function Home() {
                 </motion.div>
 
                 {/* Features Grid */}
-                <motion.div 
+                <motion.div
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     transition={{ delay: 0.4, duration: 0.8 }}
@@ -105,4 +105,4 @@ export default function Home() {
         </main>
     );
 }
-```
+
