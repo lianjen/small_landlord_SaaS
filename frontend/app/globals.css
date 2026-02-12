@@ -1,76 +1,180 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
- 
+
+/* ============================
+   MicroRent Design System v2.0
+   Japandi × Sage Green
+   ============================ */
+
+/* Google Fonts */
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=Inter:wght@300;400;500;600;700&family=DM+Sans:wght@400;500;700&display=swap');
+
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
- 
-    --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
- 
-    --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
- 
-    --primary: 221.2 83.2% 53.3%;
-    --primary-foreground: 210 40% 98%;
- 
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
- 
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
- 
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
- 
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
- 
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 221.2 83.2% 53.3%;
- 
-    --radius: 0.5rem;
+    /* Sage Green 色彩系統 */
+    --color-primary: #8BA888;
+    --color-primary-light: #B5D4B3;
+    --color-primary-dark: #5F7A5C;
+    --color-accent: #D4A574;
+    --color-background: #F7F6F3;
+    --color-surface: #FFFFFF;
+
+    /* 文字色 */
+    --color-heading: #2A2A2A;
+    --color-body: #4A4A4A;
+    --color-secondary: #7A7A7A;
+    --color-disabled: #AFAFAF;
+
+    /* 功能色 */
+    --color-success: #A8D5BA;
+    --color-warning: #FFD7A1;
+    --color-danger: #FFBDAD;
+    --color-info: #B3D4E5;
+
+    /* 間距 & 圓角 */
+    --radius: 0.75rem;
+    --radius-card: 1rem;
+    --radius-button: 0.75rem;
   }
- 
-  .dark {
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
- 
-    --card: 222.2 84% 4.9%;
-    --card-foreground: 210 40% 98%;
- 
-    --popover: 222.2 84% 4.9%;
-    --popover-foreground: 210 40% 98%;
- 
-    --primary: 217.2 91.2% 59.8%;
-    --primary-foreground: 222.2 47.4% 11.2%;
- 
-    --secondary: 217.2 32.6% 17.5%;
-    --secondary-foreground: 210 40% 98%;
- 
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
- 
-    --accent: 217.2 32.6% 17.5%;
-    --accent-foreground: 210 40% 98%;
- 
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
- 
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 224.3 76.3% 48%;
+
+  * {
+    @apply border-warm-300;
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-body);
+    font-family: 'Noto Sans TC', 'Inter', system-ui, sans-serif;
+    line-height: 1.7;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    color: var(--color-heading);
+    font-weight: 500;
+    line-height: 1.4;
   }
 }
- 
-@layer base {
-  * {
-    @apply border-border;
+
+/* ============================
+   通用組件樣式
+   ============================ */
+@layer components {
+
+  /* 狀態標籤 (Pill Badges) */
+  .badge {
+    @apply inline-flex items-center px-3 py-1 text-sm font-medium;
+    border-radius: 9999px;
   }
-  body {
-    @apply bg-background text-foreground;
+
+  .badge-success {
+    background: #A8D5BA;
+    color: #2D5F3F;
   }
+
+  .badge-warning {
+    background: #FFD7A1;
+    color: #8B6914;
+  }
+
+  .badge-danger {
+    background: #FFBDAD;
+    color: #B33A1F;
+  }
+
+  .badge-info {
+    background: #B3D4E5;
+    color: #2C5F7F;
+  }
+
+  .badge-neutral {
+    background: #E0DDD8;
+    color: #4A4A4A;
+  }
+
+  /* 卡片基礎 */
+  .mr-card {
+    @apply bg-white rounded-card p-6;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+  }
+
+  .mr-card:hover {
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+    transform: translateY(-2px);
+    transition: all 300ms ease-out;
+  }
+
+  /* 主要 CTA 按鈕 */
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 px-6 py-3 text-white font-medium rounded-button;
+    background: #D4A574;
+    box-shadow: 0 2px 8px rgba(212, 165, 116, 0.3);
+    transition: all 200ms ease;
+  }
+
+  .btn-primary:hover {
+    background: #C89560;
+    box-shadow: 0 4px 12px rgba(212, 165, 116, 0.4);
+    transform: translateY(-2px);
+  }
+
+  .btn-primary:active {
+    transform: scale(0.97);
+  }
+
+  /* 次要按鈕 */
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 px-6 py-3 font-medium rounded-button;
+    background: #FFFFFF;
+    color: #8BA888;
+    border: 2px solid #8BA888;
+    transition: all 200ms ease;
+  }
+
+  .btn-secondary:hover {
+    background: #F5F7F5;
+  }
+
+  /* 輸入框 */
+  .input-field {
+    @apply w-full px-4 py-3.5 text-base rounded-button;
+    background: #F7F6F3;
+    border: 2px solid transparent;
+    color: #2A2A2A;
+    transition: all 200ms;
+  }
+
+  .input-field:focus {
+    background: #FFFFFF;
+    border-color: #8BA888;
+    box-shadow: 0 0 0 4px rgba(139, 168, 136, 0.1);
+    outline: none;
+  }
+
+  .input-field::placeholder {
+    color: #AFAFAF;
+  }
+}
+
+/* ============================
+   滾動條美化
+   ============================ */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: #D0DBD0;
+  border-radius: 3px;
 }

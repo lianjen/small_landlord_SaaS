@@ -1,18 +1,16 @@
-import type { Metadata } from "next";
-import { Inter } from "next/font/google";
+import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
-const inter = Inter({ subsets: ["latin"] });
-
 export const metadata: Metadata = {
-    title: "MicroRent 房客專區",
-    description: "您的智慧租屋管家，輕鬆查詢租金與繳費狀態。",
+    title: "MicroRent — 您的理想租屋生活",
+    description: "小房東的智慧租屋管家。輕鬆查詢租金、一鍵報修、LINE 自動提醒，讓管理更有溫度。",
     manifest: "/manifest.json",
-    viewport: {
-        width: "device-width",
-        initialScale: 1,
-        maximumScale: 1,
-    },
+};
+
+export const viewport: Viewport = {
+    width: "device-width",
+    initialScale: 1,
+    maximumScale: 1,
 };
 
 export default function RootLayout({
@@ -22,7 +20,7 @@ export default function RootLayout({
 }>) {
     return (
         <html lang="zh-TW">
-            <body className={inter.className}>{children}</body>
+            <body>{children}</body>
         </html>
     );
 }
